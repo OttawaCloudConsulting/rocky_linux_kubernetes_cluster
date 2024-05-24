@@ -20,6 +20,7 @@ CNI_PLUGINS_VERSION="1.3.0"
 K8S_VERSION="1.30"
 KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
+MASTER_NODE_IP="<master-node-ip>"  # Replace with your master node IP address
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -37,49 +38,19 @@ error_exit() {
   exit 1
 }
 
-# Performs a system upgrade to ensure all packages are up to date.
-#
-# This function runs the dnf package manager to upgrade all installed
-# packages on the system.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to perform upgrade
 perform_upgrade() {
   log "Performing system upgrade."
   sudo dnf -y upgrade || error_exit "System upgrade failed."
 }
 
-# Enables the Cockpit web-based interface for system management.
-#
-# This function enables and starts the Cockpit service to allow for
-# remote management of the system.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to enable cockpit
 enable_cockpit() {
   log "Enabling cockpit."
   sudo systemctl enable --now cockpit.socket || error_exit "Failed to enable cockpit."
 }
 
-# Disables swap to ensure Kubernetes runs correctly.
-#
-# This function disables swap, both immediately and by removing any
-# swap entries from /etc/fstab.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to disable swap
 disable_swap() {
   log "Disabling swap."
   sudo swapoff -a
@@ -88,16 +59,7 @@ disable_swap() {
   sudo swapoff /dev/mapper/centos-swap || true
 }
 
-# Configures the firewall for Kubernetes.
-#
-# This function opens the necessary ports for Kubernetes in the firewall.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
   local ports=(6443 2379 2380 10250-10252 10255)
@@ -107,17 +69,7 @@ configure_firewall() {
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
 
-# Verifies that the necessary firewall ports are open.
-#
-# This function checks that the required ports for Kubernetes are open
-# in the firewall.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to verify firewall ports
 verify_firewall_ports() {
   log "Verifying firewall ports."
   local ports=(6443 2379 2380 10250 10251 10252 10255)
@@ -126,33 +78,14 @@ verify_firewall_ports() {
   done
 }
 
-# Installs containerd from the specified version.
-#
-# This function downloads and installs the specified version of containerd.
-#
-# Globals:
-#   CONTAINERD_VERSION (read-only): The version of containerd to install.
-#   CONTAINERD_BIN (read-only): The path to the containerd binary.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to install containerd
 install_containerd() {
   log "Installing containerd."
   wget "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz" -O /tmp/containerd.tar.gz || error_exit "Failed to download containerd."
   sudo tar Cxzvf /usr/local /tmp/containerd.tar.gz || error_exit "Failed to extract containerd."
 }
 
-# Creates a systemd service for containerd.
-#
-# This function creates and enables a systemd service for containerd.
-#
-# Globals:
-#   CONTAINERD_BIN (read-only): The path to the containerd binary.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to create containerd service
 create_containerd_service() {
   log "Creating containerd service."
   cat <<EOF | sudo tee /etc/systemd/system/containerd.service
@@ -183,32 +116,14 @@ EOF
   sudo systemctl enable --now containerd || error_exit "Failed to enable containerd."
 }
 
-# Installs runc from the specified version.
-#
-# This function downloads and installs the specified version of runc.
-#
-# Globals:
-#   RUNC_VERSION (read-only): The version of runc to install.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to install runc
 install_runc() {
   log "Installing runc."
   wget "https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}/runc.amd64" -O /tmp/runc || error_exit "Failed to download runc."
   sudo install -m 755 /tmp/runc /usr/local/sbin/runc || error_exit "Failed to install runc."
 }
 
-# Installs CNI plugins from the specified version.
-#
-# This function downloads and installs the specified version of CNI plugins.
-#
-# Globals:
-#   CNI_PLUGINS_VERSION (read-only): The version of CNI plugins to install.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to install CNI plugins
 install_cni_plugins() {
   log "Installing CNI plugins."
   wget "https://github.com/containernetworking/plugins/releases/download/v${CNI_PLUGINS_VERSION}/cni-plugins-linux-amd64-v${CNI_PLUGINS_VERSION}.tgz" -O /tmp/cni-plugins.tgz || error_exit "Failed to download CNI plugins."
@@ -216,17 +131,7 @@ install_cni_plugins() {
   sudo tar Cxzvf /opt/cni/bin /tmp/cni-plugins.tgz || error_exit "Failed to extract CNI plugins."
 }
 
-# Configures containerd with the default settings.
-#
-# This function generates the default containerd configuration and
-# updates the SystemdCgroup setting to true.
-#
-# Globals:
-#   CONTAINERD_BIN (read-only): The path to the containerd binary.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to configure containerd
 configure_containerd() {
   log "Configuring containerd."
   sudo mkdir -p /etc/containerd || error_exit "Failed to create containerd config directory."
@@ -235,17 +140,7 @@ configure_containerd() {
   sudo systemctl restart containerd || error_exit "Failed to restart containerd."
 }
 
-# Configures kernel modules and sysctl settings for Kubernetes.
-#
-# This function loads necessary kernel modules and configures sysctl
-# parameters required by Kubernetes.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to configure kernel modules and sysctl
 configure_kernel() {
   log "Configuring kernel modules and sysctl."
   cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
@@ -265,34 +160,14 @@ EOF
   sudo sysctl --system || error_exit "Failed to apply sysctl parameters."
 }
 
-# Sets SELinux to permissive mode.
-#
-# This function sets SELinux to permissive mode to avoid any potential
-# issues with Kubernetes installation and operation.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to set SELinux to permissive mode
 set_selinux_permissive() {
   log "Setting SELinux to permissive mode."
   sudo setenforce 0 || error_exit "Failed to set SELinux to permissive mode."
   sudo sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config || error_exit "Failed to update SELinux config file."
 }
 
-# Installs Kubernetes packages.
-#
-# This function installs the required Kubernetes packages including
-# kubeadm, kubelet, and kubectl.
-#
-# Globals:
-#   K8S_VERSION (read-only): The version of Kubernetes to install.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to install Kubernetes packages
 install_kubernetes() {
   log "Installing Kubernetes packages."
   sudo dnf -y install ca-certificates curl gpg || error_exit "Failed to install prerequisites."
@@ -309,51 +184,19 @@ EOF
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
 }
 
-# Enables and starts the kubelet service.
-#
-# This function enables and starts the kubelet service to ensure
-# it runs on system startup.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to enable and start kubelet
 enable_kubelet() {
   log "Enabling and starting kubelet."
   sudo systemctl enable --now kubelet || error_exit "Failed to enable kubelet."
 }
 
-# Initializes the Kubernetes cluster.
-#
-# This function initializes the Kubernetes cluster using kubeadm.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
+# Function to initialize Kubernetes cluster
 initialize_cluster() {
   log "Initializing Kubernetes cluster."
   sudo kubeadm init --v=5 || error_exit "Failed to initialize Kubernetes cluster."
 }
 
-# Configures kubectl for all users with home directories and for root.
-#
-# This function iterates over all users with home directories in /home, and
-# sets up the kubeconfig file in each user's ~/.kube directory. It also
-# sets up the kubeconfig for the root user.
-#
-# Globals:
-#   KUBECONFIG (read-only): Path to the Kubernetes configuration file.
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
-#   Copies the kubeconfig file to each user's ~/.kube directory.
-#   Changes ownership of the kubeconfig file to the respective user.
+# Function to configure kubectl for all users with home directories
 configure_kubectl_for_users() {
   log "Configuring kubectl for all users with home directories and for root."
 
@@ -379,35 +222,13 @@ configure_kubectl_for_users() {
   log "Configured kubectl for root."
 }
 
-# Installs the Calico pod network add-on for Kubernetes.
-#
-# This function applies the Calico pod network configuration to the
-# Kubernetes cluster using kubectl.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Writes log messages indicating progress and any errors encountered.
-#   Applies the Calico pod network configuration to the cluster.
+# Function to install the Calico pod network add-on
 install_pod_network() {
   log "Installing Calico pod network add-on."
   kubectl apply -f "https://docs.projectcalico.org/manifests/calico.yaml" || error_exit "Failed to install Calico pod network add-on."
 }
 
-# Displays Kubernetes cluster information and checks Calico pod status.
-#
-# This function outputs the Kubernetes cluster information using kubectl
-# and checks the status of the Calico pod until it is running.
-#
-# Globals:
-#   None
-# Arguments:
-#   None
-# Outputs:
-#   Displays cluster information on the screen and writes to log file.
-#   Checks the status of the Calico pod until it is running.
+# Function to display Kubernetes cluster information and check Calico pod status
 display_cluster_info() {
   log "Displaying Kubernetes cluster information."
   kubectl cluster-info | tee -a "$LOG_FILE"
@@ -423,6 +244,21 @@ display_cluster_info() {
     fi
     sleep 5
   done
+}
+
+# Function to create a new kubeadm token and display the join command
+create_kubeadm_token() {
+  log "Creating a new kubeadm token."
+  NEW_TOKEN=$(kubeadm token create) || error_exit "Failed to create kubeadm token."
+  log "New kubeadm token created: $NEW_TOKEN"
+
+  CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //')
+  log "CA certificate hash: $CA_CERT_HASH"
+
+  JOIN_COMMAND="sudo kubeadm join $MASTER_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
+  log "Worker node join command: $JOIN_COMMAND"
+  echo "On the worker node, run the following command to join the cluster:"
+  echo $JOIN_COMMAND
 }
 
 main() {
@@ -443,8 +279,9 @@ main() {
   enable_kubelet
   initialize_cluster
   configure_kubectl_for_users
-  install_pod_network  # Install Calico pod network
+  install_pod_network
   display_cluster_info
+  create_kubeadm_token
   log "Kubernetes master node setup completed."
 }
 
