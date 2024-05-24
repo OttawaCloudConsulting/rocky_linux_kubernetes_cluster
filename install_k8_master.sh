@@ -396,10 +396,10 @@ install_pod_network() {
   kubectl apply -f "https://docs.projectcalico.org/manifests/calico.yaml" || error_exit "Failed to install Calico pod network add-on."
 }
 
-
-# Displays Kubernetes cluster information.
+# Displays Kubernetes cluster information and checks Calico pod status.
 #
-# This function outputs the Kubernetes cluster information using kubectl.
+# This function outputs the Kubernetes cluster information using kubectl
+# and checks the status of the Calico pod until it is running.
 #
 # Globals:
 #   None
@@ -407,10 +407,22 @@ install_pod_network() {
 #   None
 # Outputs:
 #   Displays cluster information on the screen and writes to log file.
+#   Checks the status of the Calico pod until it is running.
 display_cluster_info() {
   log "Displaying Kubernetes cluster information."
   kubectl cluster-info | tee -a "$LOG_FILE"
-  kubectl get pods -n kube-system -l k8s-app=calico-node | tee -a "$LOG_FILE"
+  sleep 5
+  log "Checking the status of the Calico pod network."
+  while true; do
+    calico_status=$(kubectl get pods -n kube-system -l k8s-app=calico-node -o jsonpath='{.items[0].status.phase}')
+    echo "Calico pod status: $calico_status"
+    if [[ "$calico_status" == "Running" ]]; then
+      log "Calico pod is running."
+      kubectl get pods -n kube-system -l k8s-app=calico-node | tee -a "$LOG_FILE"
+      break
+    fi
+    sleep 5
+  done
 }
 
 main() {
@@ -431,7 +443,7 @@ main() {
   enable_kubelet
   initialize_cluster
   configure_kubectl_for_users
-  install_pod_network
+  install_pod_network  # Install Calico pod network
   display_cluster_info
   log "Kubernetes master node setup completed."
 }
