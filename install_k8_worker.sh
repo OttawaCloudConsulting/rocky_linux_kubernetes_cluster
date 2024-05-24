@@ -1,13 +1,9 @@
 #!/bin/bash
 #
 # install_k8_worker.sh
-#
 # This script installs and configures a Kubernetes worker node.
-#
 # Usage: sudo bash ./install_k8_worker.sh
-#
 # This script requires root privileges.
-#
 
 set -e
 set -u

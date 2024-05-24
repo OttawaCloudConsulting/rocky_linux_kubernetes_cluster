@@ -1,13 +1,9 @@
 #!/bin/bash
-#
 # install_k8_master.sh
-#
 # This script installs and configures a Kubernetes master node.
-#
 # Usage: sudo bash ./install_k8_master.sh
-#
 # This script requires root privileges.
-#
+
 
 set -e
 set -u
