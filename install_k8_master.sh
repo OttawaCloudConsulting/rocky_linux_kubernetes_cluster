@@ -379,6 +379,24 @@ configure_kubectl_for_users() {
   log "Configured kubectl for root."
 }
 
+# Installs the Calico pod network add-on for Kubernetes.
+#
+# This function applies the Calico pod network configuration to the
+# Kubernetes cluster using kubectl.
+#
+# Globals:
+#   None
+# Arguments:
+#   None
+# Outputs:
+#   Writes log messages indicating progress and any errors encountered.
+#   Applies the Calico pod network configuration to the cluster.
+install_pod_network() {
+  log "Installing Calico pod network add-on."
+  kubectl apply -f "https://docs.projectcalico.org/manifests/calico.yaml" || error_exit "Failed to install Calico pod network add-on."
+}
+
+
 # Displays Kubernetes cluster information.
 #
 # This function outputs the Kubernetes cluster information using kubectl.
@@ -392,6 +410,7 @@ configure_kubectl_for_users() {
 display_cluster_info() {
   log "Displaying Kubernetes cluster information."
   kubectl cluster-info | tee -a "$LOG_FILE"
+  kubectl get pods -n kube-system -l k8s-app=calico-node | tee -a "$LOG_FILE"
 }
 
 main() {
@@ -412,6 +431,7 @@ main() {
   enable_kubelet
   initialize_cluster
   configure_kubectl_for_users
+  install_pod_network
   display_cluster_info
   log "Kubernetes master node setup completed."
 }
