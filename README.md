@@ -1,4 +1,4 @@
- # rocky_linux_kubernetes_cluster
+ # Kubernetes on Rocky Linux
  
  ## Overview
  
