@@ -48,7 +48,7 @@ These scripts are particularly useful for:
  
  1. Clone the repository to your master node:
     ```bash
-    git clone https://github.com/your-repo/rocky_linux_kubernetes_cluster.git
+    git clone https://github.com/OttawaCloudConsulting/rocky_linux_kubernetes_cluster.git
     cd rocky_linux_kubernetes_cluster
     ```
  
@@ -57,9 +57,9 @@ These scripts are particularly useful for:
     sudo bash install_k8_master.sh
     ```
  
- 3. After the master node is set up, run the `install_k8_node.sh` script on each worker node:
+ 3. After the master node is set up, run the `install_k8_worker.sh` script on each worker node:
     ```bash
-    sudo bash install_k8_node.sh <master-node-ip>
+    sudo bash install_k8_node.sh
     ```
  
  4. Join each worker node to the cluster using the command provided by the master node setup process.
