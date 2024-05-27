@@ -2,11 +2,11 @@
  
  ## Overview
  
-Setting up a Kubernetes cluster manually can be a complex and time-consuming process. This repository aims to simplify the setup by providing two automated scripts: `install_k8_master.sh` for configuring the master node and `install_k8_node.sh` for setting up worker nodes. These scripts are designed to run on Rocky Linux 8, leveraging automated steps to ensure a consistent and repeatable installation process.
+Setting up a Kubernetes cluster manually can be a complex and time-consuming process. This repository aims to simplify the setup by providing two automated scripts: `install_k8_master.sh` for configuring the master node and `install_k8_worker.sh` for setting up worker nodes. These scripts are designed to run on Rocky Linux 8, leveraging automated steps to ensure a consistent and repeatable installation process.
 
 The `install_k8_master.sh` script is responsible for preparing a node to act as the master in a Kubernetes cluster. This involves installing and configuring essential components such as containerd, kubelet, kubeadm, and kubectl, as well as setting up the necessary firewall rules, kernel parameters, and SELinux settings. Additionally, it initializes the Kubernetes cluster and installs a pod network add-on (Calico) to enable communication between pods across the cluster.
 
-The `install_k8_node.sh` script prepares worker nodes to join an existing Kubernetes cluster. Similar to the master node script, it installs and configures containerd, kubelet, and other necessary components, sets up firewall rules, kernel parameters, and adjusts SELinux settings. The script also ensures that each worker node can successfully communicate with the master node and join the cluster using the provided join command.
+The `install_k8_worker.sh` script prepares worker nodes to join an existing Kubernetes cluster. Similar to the master node script, it installs and configures containerd, kubelet, and other necessary components, sets up firewall rules, kernel parameters, and adjusts SELinux settings. The script also ensures that each worker node can successfully communicate with the master node and join the cluster using the provided join command.
  
  ### Purpose
  
@@ -59,7 +59,7 @@ These scripts are particularly useful for:
  
  3. After the master node is set up, run the `install_k8_worker.sh` script on each worker node:
     ```bash
-    sudo bash install_k8_node.sh
+    sudo bash install_k8_worker.sh
     ```
  
  4. Join each worker node to the cluster using the command provided by the master node setup process.
@@ -89,7 +89,7 @@ These scripts are particularly useful for:
  - **display_cluster_info**: Displays cluster information and checks the status of the Calico pod.
  - **create_kubeadm_token**: Creates a new kubeadm token and displays the join command.
  
- ### install_k8_node.sh
+ ### install_k8_worker.sh
  
  This script sets up a worker node and joins it to the Kubernetes cluster.
  
