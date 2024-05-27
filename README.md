@@ -1,5 +1,5 @@
  # rocky_linux_kubernetes_cluster
- m
+ 
  ## Overview
  
 Setting up a Kubernetes cluster manually can be a complex and time-consuming process. This repository aims to simplify the setup by providing two automated scripts: `install_k8_master.sh` for configuring the master node and `install_k8_node.sh` for setting up worker nodes. These scripts are designed to run on Rocky Linux 8, leveraging automated steps to ensure a consistent and repeatable installation process.
