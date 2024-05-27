@@ -254,7 +254,7 @@ create_kubeadm_token() {
   JOIN_COMMAND="sudo kubeadm join $MASTER_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
   log "Worker node join command: $JOIN_COMMAND"
   echo "On the worker node, run the following command to join the cluster:"
-  echo $JOIN_COMMAND
+  echo "$JOIN_COMMAND"
 }
 
 main() {
