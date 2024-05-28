@@ -13,7 +13,8 @@ LOG_FILE="/var/log/k8s_worker_install.log"
 CONTAINERD_VERSION="1.7.9"
 RUNC_VERSION="v1.1.10"
 CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION="1.30"
+K8S_VERSION_MINOR=""
+K8S_VERSION_PATCH=""
 CONTAINERD_BIN="/usr/local/bin/containerd"
 
 # Ensure /usr/local/bin is in the PATH
@@ -154,10 +155,10 @@ install_kubernetes() {
   cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/repodata/repomd.xml.key
 EOF
 
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
@@ -169,10 +170,29 @@ enable_kubelet() {
   sudo systemctl enable --now kubelet || error_exit "Failed to enable kubelet."
 }
 
+# Function to load IPVS modules and configure them to load on boot
+configure_ipvs() {
+    echo "Loading IPVS modules..."
+    sudo modprobe ip_vs
+    sudo modprobe ip_vs_rr
+    sudo modprobe ip_vs_wrr
+    sudo modprobe ip_vs_sh
+    sudo modprobe nf_conntrack_ipv4
+
+    echo "Ensuring IPVS modules load on boot..."
+    echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
+
+    echo "Verifying loaded modules..."
+    lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+
+    echo "IPVS modules are configured and loaded successfully."
+}
+
 main() {
   log "Starting Kubernetes worker node setup."
   perform_upgrade
   disable_swap
+  configure_ipvs
   configure_firewall
   install_containerd
   create_containerd_service

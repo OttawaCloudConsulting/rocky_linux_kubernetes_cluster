@@ -13,7 +13,9 @@ LOG_FILE="/var/log/k8s_install.log"
 CONTAINERD_VERSION="1.7.9"
 RUNC_VERSION="v1.1.10"
 CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION="1.30"
+K8S_VERSION_MINOR=""
+K8S_VERSION_PATCH=""
+K8_INIT_FILE="kubeadm-config.yaml"
 KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
 MASTER_NODE_IP="<master-node-ip>"  # Replace with your master node IP address
@@ -112,6 +114,25 @@ EOF
   sudo systemctl enable --now containerd || error_exit "Failed to enable containerd."
 }
 
+# Function to find the latest version of kubeadm
+get_latest_kubeadm_version() {
+    echo "Finding the latest version of kubeadm..."
+    latest_version=$(yum list kubeadm --showduplicates \
+        | awk '/kubeadm.x86_64/ {print $2}' \
+        | sort -V \
+        | tail -n 1)
+    if [[ -z "$latest_version" ]]; then
+        echo "Unable to find the latest kubeadm version."
+        exit 1
+    fi
+    echo "Latest kubeadm version found: $latest_version"
+    
+    # Extract the patch version (e.g., 1.30.1) from the full version string
+    K8S_VERSION_PATCH=$(echo $latest_version | grep -oP '^\d+\.\d+\.\d+')
+    # Extract the minor version (e.g., 1.30) from the patch version
+    K8S_VERSION_MINOR=$(echo $K8S_VERSION_PATCH | grep -oP '^\d+\.\d+')
+}
+
 # Function to install runc
 install_runc() {
   log "Installing runc."
@@ -171,10 +192,10 @@ install_kubernetes() {
   cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/repodata/repomd.xml.key
 EOF
 
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
@@ -186,10 +207,23 @@ enable_kubelet() {
   sudo systemctl enable --now kubelet || error_exit "Failed to enable kubelet."
 }
 
+update_kubeadm_config() {
+    echo "Updating kubeadm config file with actual values..."
+    if [[ ! -f "$K8_INIT_FILE" ]]; then
+        echo "Config file $K8_INIT_FILE does not exist."
+        exit 1
+    fi
+
+    sed -i "s/{YOUR_MASTER_NODE_IP}/$MASTER_IP/g" "$K8_INIT_FILE"
+    sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
+
+    echo "kubeadm config file updated successfully."
+}
+
 # Function to initialize Kubernetes cluster
 initialize_cluster() {
   log "Initializing Kubernetes cluster."
-  sudo kubeadm init --v=5 || error_exit "Failed to initialize Kubernetes cluster."
+  sudo sudo kubeadm init --config=kubeadm-config.yaml --v=5 || error_exit "Failed to initialize Kubernetes cluster."
 }
 
 # Function to configure kubectl for all users with home directories
@@ -257,15 +291,35 @@ create_kubeadm_token() {
   echo "$JOIN_COMMAND"
 }
 
+# Function to load IPVS modules and configure them to load on boot
+configure_ipvs() {
+    echo "Loading IPVS modules..."
+    sudo modprobe ip_vs
+    sudo modprobe ip_vs_rr
+    sudo modprobe ip_vs_wrr
+    sudo modprobe ip_vs_sh
+    sudo modprobe nf_conntrack_ipv4
+
+    echo "Ensuring IPVS modules load on boot..."
+    echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
+
+    echo "Verifying loaded modules..."
+    lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+
+    echo "IPVS modules are configured and loaded successfully."
+}
+
 main() {
   log "Starting Kubernetes master node setup."
   perform_upgrade
   enable_cockpit
   disable_swap
+  configure_ipvs
   configure_firewall
   verify_firewall_ports
   install_containerd
   create_containerd_service
+  get_latest_kubeadm_version
   install_runc
   install_cni_plugins
   configure_containerd
@@ -273,6 +327,7 @@ main() {
   set_selinux_permissive
   install_kubernetes
   enable_kubelet
+  update_kubeadm_config
   initialize_cluster
   configure_kubectl_for_users
   install_pod_network
