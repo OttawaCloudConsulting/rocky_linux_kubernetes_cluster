@@ -2,6 +2,7 @@
 # install_k8_master.sh
 # This script installs and configures a Kubernetes master node.
 # Usage: sudo bash ./install_k8_master.sh
+# Usage: sudo bash ./install_k8_master.sh PI_ADDRESS=x.x.x.x
 # This script requires root privileges.
 
 
@@ -18,7 +19,8 @@ K8S_VERSION_PATCH=""
 K8_INIT_FILE="kubeadm-config.yaml"
 KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
-MASTER_NODE_IP="<master-node-ip>"  # Replace with your master node IP address
+MASTER_NODE_IP=""
+FIREWALLD_FILE="firewalld/k8s-master.xml"
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -34,6 +36,19 @@ error_exit() {
   local msg="$1"
   log "ERROR: $msg"
   exit 1
+}
+
+# Function to get the IP address of the first non-loopback network interface
+get_first_non_loopback_ip() {
+    local ip_address
+    ip_address=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
+    
+    if [[ -z "$ip_address" ]]; then
+        echo "Error: Could not find a valid IP address for a non-loopback interface."
+        exit 1
+    fi
+
+    echo "$ip_address"
 }
 
 # Function to perform upgrade
@@ -60,10 +75,13 @@ disable_swap() {
 # Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
-  local ports=(6443 2379 2380 10250-10252 10255)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
-  done
+  # local ports=(6443 2379 2380 10250-10252 10255)
+  # for port in "${ports[@]}"; do
+  #   sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
+  # done
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-master || error_exit "Failed to create new service."
+  # sudo firewall-cmd --permanent --add-service=k8s-master || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
 
@@ -72,7 +90,7 @@ verify_firewall_ports() {
   log "Verifying firewall ports."
   local ports=(6443 2379 2380 10250 10251 10252 10255)
   for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || error_exit "Port $port is not open."
+    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "Port $port is not open."
   done
 }
 
@@ -114,23 +132,23 @@ EOF
   sudo systemctl enable --now containerd || error_exit "Failed to enable containerd."
 }
 
-# Function to find the latest version of kubeadm
+# Function to find the latest version of kubernetes from github releases
 get_latest_kubeadm_version() {
     echo "Finding the latest version of kubeadm..."
-    latest_version=$(yum list kubeadm --showduplicates \
-        | awk '/kubeadm.x86_64/ {print $2}' \
-        | sort -V \
-        | tail -n 1)
+    TAGS=$(curl -s https://api.github.com/repos/kubernetes/kubernetes/tags | jq -r '.[].name')
+    latest_version=$(echo "$TAGS" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
     if [[ -z "$latest_version" ]]; then
         echo "Unable to find the latest kubeadm version."
         exit 1
     fi
     echo "Latest kubeadm version found: $latest_version"
-    
+    LATEST_VERSION_NO_PREFIX=${latest_version#v}
+    echo $LATEST_VERSION_NO_PREFIX
+
     # Extract the patch version (e.g., 1.30.1) from the full version string
-    K8S_VERSION_PATCH=$(echo $latest_version | grep -oP '^\d+\.\d+\.\d+')
+    K8S_VERSION_PATCH=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+\.\d+')
     # Extract the minor version (e.g., 1.30) from the patch version
-    K8S_VERSION_MINOR=$(echo $K8S_VERSION_PATCH | grep -oP '^\d+\.\d+')
+    K8S_VERSION_MINOR=$(echo $K8S_VERSION_PATCH# | grep -oP '^\d+\.\d+')
 }
 
 # Function to install runc
@@ -298,7 +316,7 @@ configure_ipvs() {
     sudo modprobe ip_vs_rr
     sudo modprobe ip_vs_wrr
     sudo modprobe ip_vs_sh
-    sudo modprobe nf_conntrack_ipv4
+    sudo modprobe nf_conntrack
 
     echo "Ensuring IPVS modules load on boot..."
     echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
@@ -309,6 +327,30 @@ configure_ipvs() {
     echo "IPVS modules are configured and loaded successfully."
 }
 
+# Function to set MASTER_NODE_IP variable
+set_master_node_ip() {
+  if [[ $# -eq 1 ]]; then
+      # Parse the argument
+      if [[ $1 =~ ^IP_ADDRESS=([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+          IP_ADDRESS="${1#*=}"
+          log_message "Using specified IP address: $IP_ADDRESS"
+          MASTER_NODE_IP=$IP_ADDRESS
+      else
+          log_message "Error: Invalid argument format. Expected format is IP_ADDRESS=x.x.x.x"
+          exit 1
+      fi
+  elif [[ $# -eq 0 ]]; then
+      # Get the IP address of the first non-loopback network interface
+      IP_ADDRESS=$(get_first_non_loopback_ip)
+      log_message "Detected IP address: $IP_ADDRESS"
+      MASTER_NODE_IP=$IP_ADDRESS
+  else
+      log_message "Error: Invalid number of arguments."
+      exit 1
+  fi
+}
+
+# Main function
 main() {
   log "Starting Kubernetes master node setup."
   perform_upgrade
