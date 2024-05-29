@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Kubernetes Master Basic Ports</short>
+  <description>Ports required for a Kubernetes Master node per https://kubernetes.io/docs/setup/independent/install-kubeadm/</description>
+  <port protocol="udp" port="500"/>
+  <port protocol="udp" port="4500"/>
+  <port protocol="tcp" port="6443"/>
+  <port protocol="tcp" port="2379"/>
+  <port protocol="tcp" port="2380"/>
+  <port protocol="tcp" port="10250"/>
+  <port protocol="tcp" port="10251"/>
+  <port protocol="tcp" port="10252"/>
+  <port protocol="tcp" port="10255"/>
+  <port protocol="tcp" port="10257"/>
+  <port protocol="tcp" port="10259"/>
+</service>
