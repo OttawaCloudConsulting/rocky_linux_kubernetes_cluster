@@ -80,7 +80,8 @@ configure_firewall() {
   #   sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
   # done
   sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-master || error_exit "Failed to create new service."
-  # sudo firewall-cmd --permanent --add-service=k8s-master || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-master || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
@@ -232,7 +233,7 @@ update_kubeadm_config() {
         exit 1
     fi
 
-    sed -i "s/{YOUR_MASTER_NODE_IP}/$MASTER_IP/g" "$K8_INIT_FILE"
+    sed -i "s/{YOUR_MASTER_NODE_IP}/$MASTER_NODE_IP/g" "$K8_INIT_FILE"
     sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
 
     echo "kubeadm config file updated successfully."
@@ -333,19 +334,19 @@ set_master_node_ip() {
       # Parse the argument
       if [[ $1 =~ ^IP_ADDRESS=([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
           IP_ADDRESS="${1#*=}"
-          log_message "Using specified IP address: $IP_ADDRESS"
+          log "Using specified IP address: $IP_ADDRESS"
           MASTER_NODE_IP=$IP_ADDRESS
       else
-          log_message "Error: Invalid argument format. Expected format is IP_ADDRESS=x.x.x.x"
+          log "Error: Invalid argument format. Expected format is IP_ADDRESS=x.x.x.x"
           exit 1
       fi
   elif [[ $# -eq 0 ]]; then
       # Get the IP address of the first non-loopback network interface
       IP_ADDRESS=$(get_first_non_loopback_ip)
-      log_message "Detected IP address: $IP_ADDRESS"
+      log "Detected IP address: $IP_ADDRESS"
       MASTER_NODE_IP=$IP_ADDRESS
   else
-      log_message "Error: Invalid number of arguments."
+      log "Error: Invalid number of arguments."
       exit 1
   fi
 }
@@ -353,6 +354,7 @@ set_master_node_ip() {
 # Main function
 main() {
   log "Starting Kubernetes master node setup."
+  set_master_node_ip "$@"
   perform_upgrade
   enable_cockpit
   disable_swap
