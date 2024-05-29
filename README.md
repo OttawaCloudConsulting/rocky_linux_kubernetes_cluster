@@ -108,6 +108,7 @@ These scripts are particularly useful for:
  
  ## Known Issues and Troubleshooting
  
+ - **Timeouts**: nftables is the successor to iptables, and may need additional configuration for [Proxy Modes](https://kubernetes.io/docs/reference/networking/virtual-ips/)
  - **Port Conflicts**: Ensure no other processes are using the required Kubernetes ports (e.g., 10250) before running the scripts.
  - **Firewall Rules**: Double-check firewall rules if nodes cannot communicate.
  - **Network Configuration**: Verify network configuration if the worker nodes cannot join the master node.
