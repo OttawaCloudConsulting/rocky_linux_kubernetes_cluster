@@ -5,17 +5,22 @@
 # Usage: sudo bash ./install_k8_worker.sh
 # This script requires root privileges.
 
+
 set -e
 set -u
 
 # Constants
-LOG_FILE="/var/log/k8s_worker_install.log"
+LOG_FILE="/var/log/k8s_install.log"
 CONTAINERD_VERSION="1.7.9"
 RUNC_VERSION="v1.1.10"
 CNI_PLUGINS_VERSION="1.3.0"
 K8S_VERSION_MINOR=""
 K8S_VERSION_PATCH=""
+K8_INIT_FILE="kubeadm-config.yaml"
+KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
+MASTER_NODE_IP=""
+FIREWALLD_FILE="firewalld/k8s-worker.xml"
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -155,10 +160,10 @@ install_kubernetes() {
   cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_PATCH}/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/repodata/repomd.xml.key
 EOF
 
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
@@ -188,6 +193,25 @@ configure_ipvs() {
     echo "IPVS modules are configured and loaded successfully."
 }
 
+# Function to find the latest version of kubernetes from github releases
+get_latest_kubeadm_version() {
+    echo "Finding the latest version of kubeadm..."
+    TAGS=$(curl -s https://api.github.com/repos/kubernetes/kubernetes/tags | jq -r '.[].name')
+    latest_version=$(echo "$TAGS" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+    if [[ -z "$latest_version" ]]; then
+        echo "Unable to find the latest kubeadm version."
+        exit 1
+    fi
+    echo "Latest kubeadm version found: $latest_version"
+    LATEST_VERSION_NO_PREFIX=${latest_version#v}
+    echo $LATEST_VERSION_NO_PREFIX
+
+    # Extract the patch version (e.g., 1.30.1) from the full version string
+    K8S_VERSION_PATCH=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+\.\d+')
+    # Extract the minor version (e.g., 1.30) from the patch version
+    K8S_VERSION_MINOR=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+')
+}
+
 main() {
   log "Starting Kubernetes worker node setup."
   perform_upgrade
@@ -196,6 +220,7 @@ main() {
   configure_firewall
   install_containerd
   create_containerd_service
+  get_latest_kubeadm_version
   install_runc
   install_cni_plugins
   configure_containerd
