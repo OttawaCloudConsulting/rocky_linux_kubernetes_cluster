@@ -182,7 +182,7 @@ configure_ipvs() {
     sudo modprobe ip_vs_rr
     sudo modprobe ip_vs_wrr
     sudo modprobe ip_vs_sh
-    sudo modprobe nf_conntrack_ipv4
+    sudo modprobe nf_conntrack
 
     echo "Ensuring IPVS modules load on boot..."
     echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
