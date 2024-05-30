@@ -280,7 +280,7 @@ install_pod_network() {
 # Function to display Kubernetes cluster information and check Calico pod status
 display_cluster_info() {
   log "Displaying Kubernetes cluster information."
-  kubectl cluster-info | tee -a "$LOG_FILE"
+  kubectl cluster-info | sudo tee -a "$LOG_FILE"
   sleep 5
   log "Checking the status of the Calico pod network."
   while true; do
