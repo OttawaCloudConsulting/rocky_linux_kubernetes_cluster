@@ -328,6 +328,17 @@ configure_ipvs() {
     echo "IPVS modules are configured and loaded successfully."
 }
 
+# Function to increase nofile limits to 1048576
+increase_nofile_limits() {
+    echo "Increasing nofile limits..."
+    echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
+    echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+    sudo sysctl -p
+    echo "Nofile limits increased successfully."
+}
+
 # Function to set MASTER_NODE_IP variable
 set_master_node_ip() {
   if [[ $# -eq 1 ]]; then
@@ -356,6 +367,7 @@ main() {
   log "Starting Kubernetes master node setup."
   set_master_node_ip "$@"
   perform_upgrade
+  increase_nofile_limits
   enable_cockpit
   disable_swap
   configure_ipvs

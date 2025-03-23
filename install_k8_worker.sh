@@ -212,10 +212,22 @@ get_latest_kubeadm_version() {
     K8S_VERSION_MINOR=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+')
 }
 
+# Function to increase nofile limits to 1048576
+increase_nofile_limits() {
+    echo "Increasing nofile limits..."
+    echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
+    echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+    sudo sysctl -p
+    echo "Nofile limits increased successfully."
+}
+
 main() {
   log "Starting Kubernetes worker node setup."
   perform_upgrade
   disable_swap
+  increase_nofile_limits
   configure_ipvs
   configure_firewall
   install_containerd
