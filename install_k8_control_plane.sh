@@ -1,8 +1,8 @@
 #!/bin/bash
-# install_k8_master.sh
-# This script installs and configures a Kubernetes master node.
-# Usage: sudo bash ./install_k8_master.sh
-# Usage: sudo bash ./install_k8_master.sh PI_ADDRESS=x.x.x.x
+# install_k8_control_plane.sh
+# This script installs and configures a Kubernetes control plane node.
+# Usage: sudo bash ./install_k8_control_plane.sh
+# Usage: sudo bash ./install_k8_control_plane.sh CONTROL_PLANE_ADDRESS=x.x.x.x
 # This script requires root privileges.
 
 
@@ -19,8 +19,8 @@ K8S_VERSION_PATCH="1.34.0"
 K8_INIT_FILE="kubeadm-config.yaml"
 KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
-MASTER_NODE_IP=""
-FIREWALLD_FILE="firewalld/k8s-master.xml"
+CONTROL_PLANE_NODE_IP=""
+FIREWALLD_FILE="firewalld/k8s-control-plane.xml"
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -65,9 +65,9 @@ enable_cockpit() {
 
 # Function to disable swap
 disable_swap() {
-  log "Disabling swap."
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-controlplane || error_exit "Failed to create new service."
   sudo swapoff -a
-  sudo sed -i '/swap/d' /etc/fstab
+  sudo firewall-cmd --permanent --add-service=k8s-controlplane || error_exit "Failed to add service to firewall."
   sudo sed -i 's/^\/dev\/mapper\/centos-swap/#\/dev\/mapper\/centos-swap/' /etc/fstab
   sudo swapoff /dev/mapper/centos-swap || true
 }
@@ -79,9 +79,9 @@ configure_firewall() {
   # for port in "${ports[@]}"; do
   #   sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
   # done
-  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-master || error_exit "Failed to create new service."
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-control-plane || error_exit "Failed to create new service."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
-  sudo firewall-cmd --permanent --add-service=k8s-master || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-control-plane || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
@@ -233,7 +233,7 @@ update_kubeadm_config() {
         exit 1
     fi
 
-    sed -i "s/{YOUR_MASTER_NODE_IP}/$MASTER_NODE_IP/g" "$K8_INIT_FILE"
+  sed -i "s/{CONTROL_PLANE_NODE_IP}/$CONTROL_PLANE_NODE_IP/g" "$K8_INIT_FILE"
     sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
 
     echo "kubeadm config file updated successfully."
@@ -281,7 +281,7 @@ create_kubeadm_token() {
   CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //')
   log "CA certificate hash: $CA_CERT_HASH"
 
-  JOIN_COMMAND="sudo kubeadm join $MASTER_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
+  JOIN_COMMAND="sudo kubeadm join $CONTROL_PLANE_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
   log "Worker node join command: $JOIN_COMMAND"
   echo "On the worker node, run the following command to join the cluster:"
   echo "$JOIN_COMMAND"
@@ -345,7 +345,7 @@ check_root() {
 main() {
   check_root
   install_dependencies
-  log "Starting Kubernetes master node setup."
+  log "Starting Kubernetes control plane node setup."
   perform_upgrade
   increase_nofile_limits
   enable_cockpit
@@ -369,7 +369,7 @@ main() {
   # install_pod_network (removed for Cilium)
   # display_cluster_info (removed for Cilium)
   create_kubeadm_token
-  log "Kubernetes master node setup completed."
+  log "Kubernetes control plane node setup completed."
 }
 
 main "$@"

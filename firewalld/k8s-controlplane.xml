@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <service>
-  <short>Kubernetes Master Basic Ports</short>
-  <description>Ports required for a Kubernetes Master node per https://kubernetes.io/docs/setup/independent/install-kubeadm/</description>
+  <short>Kubernetes Control Plane Basic Ports</short>
+  <description>Ports required for a Kubernetes Control Plane node per https://kubernetes.io/docs/setup/independent/install-kubeadm/</description>
   <port protocol="udp" port="500"/>
   <port protocol="udp" port="4500"/>
   <port protocol="tcp" port="6443"/>
