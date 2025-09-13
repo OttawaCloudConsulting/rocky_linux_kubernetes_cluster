@@ -1,3 +1,19 @@
+# Function to check and install required dependencies
+install_dependencies() {
+  local deps=(wget tar curl gpg)
+  local missing=()
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    log "Installing missing dependencies: ${missing[*]}"
+    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
+  else
+    log "All required dependencies are already installed."
+  fi
+}
 #!/bin/bash
 #
 # install_k8_worker.sh
@@ -6,25 +22,20 @@
 # This script requires root privileges.
 
 
-set -e
-set -u
+set -eux
 
-# Constants
 LOG_FILE="/var/log/k8s_install.log"
-CONTAINERD_VERSION="1.7.9"
-RUNC_VERSION="v1.1.10"
-CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION_MINOR=""
-K8S_VERSION_PATCH=""
-K8_INIT_FILE="kubeadm-config.yaml"
-KUBECONFIG="/etc/kubernetes/admin.conf"
+CONTAINERD_VERSION="2.1.4"
+RUNC_VERSION="v1.3.1"
+CNI_PLUGINS_VERSION="1.8.0"
+K8S_VERSION_MINOR="1.34"
+K8S_VERSION_PATCH="1.34.0"
 CONTAINERD_BIN="/usr/local/bin/containerd"
-MASTER_NODE_IP=""
-FIREWALLD_FILE="firewalld/k8s-worker.xml"
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
 
+# Logging function
 # Logging function
 log() {
   local msg="$1"
@@ -38,10 +49,20 @@ error_exit() {
   exit 1
 }
 
+# Check for root
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log "ERROR: This script must be run as root."
+    exit 1
+  fi
+}
+
 # Function to perform upgrade
 perform_upgrade() {
   log "Performing system upgrade."
   sudo dnf -y upgrade || error_exit "System upgrade failed."
+  log "Installing jq dependency."
+  sudo dnf -y install jq || error_exit "Failed to install jq."
 }
 
 # Function to disable swap
@@ -56,9 +77,15 @@ disable_swap() {
 # Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
-  local ports=(10250 30000-32767)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
+  # Main Kubernetes ports
+  local tcp_ports=(10250 30000-32767)
+  # Common CNI plugin ports (as ranges)
+  local udp_ports=(8285-8472 4789 6783-6784)
+  for port in "${tcp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add TCP port $port to firewall."
+  done
+  for port in "${udp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --add-port="${port}/udp" --permanent || error_exit "Failed to add UDP port $port to firewall."
   done
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
@@ -177,53 +204,37 @@ enable_kubelet() {
 
 # Function to load IPVS modules and configure them to load on boot
 configure_ipvs() {
-    echo "Loading IPVS modules..."
-    sudo modprobe ip_vs
-    sudo modprobe ip_vs_rr
-    sudo modprobe ip_vs_wrr
-    sudo modprobe ip_vs_sh
-    sudo modprobe nf_conntrack
+  log "Loading IPVS modules..."
+  sudo modprobe ip_vs || error_exit "Failed to load ip_vs module."
+  sudo modprobe ip_vs_rr || error_exit "Failed to load ip_vs_rr module."
+  sudo modprobe ip_vs_wrr || error_exit "Failed to load ip_vs_wrr module."
+  sudo modprobe ip_vs_sh || error_exit "Failed to load ip_vs_sh module."
+  sudo modprobe nf_conntrack || error_exit "Failed to load nf_conntrack module."
 
-    echo "Ensuring IPVS modules load on boot..."
-    echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
+  log "Ensuring IPVS modules load on boot..."
+  echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
 
-    echo "Verifying loaded modules..."
-    lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+  log "Verifying loaded modules..."
+  lsmod | grep -e ip_vs -e nf_conntrack_ipv4
 
-    echo "IPVS modules are configured and loaded successfully."
+  log "IPVS modules are configured and loaded successfully."
 }
 
-# Function to find the latest version of kubernetes from github releases
-get_latest_kubeadm_version() {
-    echo "Finding the latest version of kubeadm..."
-    TAGS=$(curl -s https://api.github.com/repos/kubernetes/kubernetes/tags | jq -r '.[].name')
-    latest_version=$(echo "$TAGS" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
-    if [[ -z "$latest_version" ]]; then
-        echo "Unable to find the latest kubeadm version."
-        exit 1
-    fi
-    echo "Latest kubeadm version found: $latest_version"
-    LATEST_VERSION_NO_PREFIX=${latest_version#v}
-    echo $LATEST_VERSION_NO_PREFIX
-
-    # Extract the patch version (e.g., 1.30.1) from the full version string
-    K8S_VERSION_PATCH=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+\.\d+')
-    # Extract the minor version (e.g., 1.30) from the patch version
-    K8S_VERSION_MINOR=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+')
-}
 
 # Function to increase nofile limits to 1048576
 increase_nofile_limits() {
-    echo "Increasing nofile limits..."
-    echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
-    echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
-    sudo sysctl -p
-    echo "Nofile limits increased successfully."
+  log "Increasing nofile limits..."
+  grep -q "* soft nofile 1048576" /etc/security/limits.conf || echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
+  grep -q "* hard nofile 1048576" /etc/security/limits.conf || echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+  grep -q "session required pam_limits.so" /etc/pam.d/common-session || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
+  grep -q "fs.file-max = 1048576" /etc/sysctl.conf || echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+  sudo sysctl -p
+  log "Nofile limits increased successfully."
 }
 
 main() {
+  check_root
+  install_dependencies
   log "Starting Kubernetes worker node setup."
   perform_upgrade
   disable_swap
@@ -232,7 +243,6 @@ main() {
   configure_firewall
   install_containerd
   create_containerd_service
-  get_latest_kubeadm_version
   install_runc
   install_cni_plugins
   configure_containerd

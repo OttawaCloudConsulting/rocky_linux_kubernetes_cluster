@@ -11,11 +11,11 @@ set -u
 
 # Constants
 LOG_FILE="/var/log/k8s_install.log"
-CONTAINERD_VERSION="1.7.9"
-RUNC_VERSION="v1.1.10"
-CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION_MINOR=""
-K8S_VERSION_PATCH=""
+CONTAINERD_VERSION="2.1.4"
+RUNC_VERSION="v1.3.1"
+CNI_PLUGINS_VERSION="1.8.0"
+K8S_VERSION_MINOR="1.34"
+K8S_VERSION_PATCH="1.34.0"
 K8_INIT_FILE="kubeadm-config.yaml"
 KUBECONFIG="/etc/kubernetes/admin.conf"
 CONTAINERD_BIN="/usr/local/bin/containerd"
@@ -312,66 +312,69 @@ create_kubeadm_token() {
 
 # Function to load IPVS modules and configure them to load on boot
 configure_ipvs() {
-    echo "Loading IPVS modules..."
-    sudo modprobe ip_vs
-    sudo modprobe ip_vs_rr
-    sudo modprobe ip_vs_wrr
-    sudo modprobe ip_vs_sh
-    sudo modprobe nf_conntrack
+    log "Loading IPVS modules..."
+    sudo modprobe ip_vs || error_exit "Failed to load ip_vs module."
+    sudo modprobe ip_vs_rr || error_exit "Failed to load ip_vs_rr module."
+    sudo modprobe ip_vs_wrr || error_exit "Failed to load ip_vs_wrr module."
+    sudo modprobe ip_vs_sh || error_exit "Failed to load ip_vs_sh module."
+    sudo modprobe nf_conntrack || error_exit "Failed to load nf_conntrack module."
 
-    echo "Ensuring IPVS modules load on boot..."
+    log "Ensuring IPVS modules load on boot..."
     echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
 
-    echo "Verifying loaded modules..."
+    log "Verifying loaded modules..."
     lsmod | grep -e ip_vs -e nf_conntrack_ipv4
 
-    echo "IPVS modules are configured and loaded successfully."
+    log "IPVS modules are configured and loaded successfully."
 }
 
 # Function to increase nofile limits to 1048576
 increase_nofile_limits() {
-    echo "Increasing nofile limits..."
-    echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
-    echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+    log "Increasing nofile limits..."
+    grep -q "* soft nofile 1048576" /etc/security/limits.conf || echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    grep -q "* hard nofile 1048576" /etc/security/limits.conf || echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+    grep -q "session required pam_limits.so" /etc/pam.d/common-session || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
+    grep -q "fs.file-max = 1048576" /etc/sysctl.conf || echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
     sudo sysctl -p
-    echo "Nofile limits increased successfully."
+    log "Nofile limits increased successfully."
 }
 
-# Function to set MASTER_NODE_IP variable
-set_master_node_ip() {
-  if [[ $# -eq 1 ]]; then
-      # Parse the argument
-      if [[ $1 =~ ^IP_ADDRESS=([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-          IP_ADDRESS="${1#*=}"
-          log "Using specified IP address: $IP_ADDRESS"
-          MASTER_NODE_IP=$IP_ADDRESS
-      else
-          log "Error: Invalid argument format. Expected format is IP_ADDRESS=x.x.x.x"
-          exit 1
-      fi
-  elif [[ $# -eq 0 ]]; then
-      # Get the IP address of the first non-loopback network interface
-      IP_ADDRESS=$(get_first_non_loopback_ip)
-      log "Detected IP address: $IP_ADDRESS"
-      MASTER_NODE_IP=$IP_ADDRESS
+# Function to check and install required dependencies
+install_dependencies() {
+  local deps=(wget tar curl gpg)
+  local missing=()
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    log "Installing missing dependencies: ${missing[*]}"
+    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
   else
-      log "Error: Invalid number of arguments."
-      exit 1
+    log "All required dependencies are already installed."
+  fi
+}
+
+# Check for root
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log "ERROR: This script must be run as root."
+    exit 1
   fi
 }
 
 # Main function
 main() {
+  check_root
+  install_dependencies
   log "Starting Kubernetes master node setup."
-  set_master_node_ip "$@"
   perform_upgrade
   increase_nofile_limits
   enable_cockpit
   disable_swap
   configure_ipvs
-  configure_firewall
+  # configure_firewall
   verify_firewall_ports
   install_containerd
   create_containerd_service
