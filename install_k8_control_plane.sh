@@ -9,18 +9,11 @@
 set -e
 set -u
 
-# Constants
-LOG_FILE="/var/log/k8s_install.log"
-CONTAINERD_VERSION="2.1.4"
-RUNC_VERSION="v1.3.1"
-CNI_PLUGINS_VERSION="1.8.0"
-K8S_VERSION_MINOR="1.34"
-K8S_VERSION_PATCH="1.34.0"
-K8_INIT_FILE="kubeadm-config.yaml"
-KUBECONFIG="/etc/kubernetes/admin.conf"
-CONTAINERD_BIN="/usr/local/bin/containerd"
+# Source shared configuration
+source ./k8s-config.conf || { echo "Failed to load configuration"; exit 1; }
+
+# Control plane specific variables
 CONTROL_PLANE_NODE_IP=""
-FIREWALLD_FILE="firewalld/k8s-control-plane.xml"
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -51,6 +44,17 @@ get_first_non_loopback_ip() {
     echo "$ip_address"
 }
 
+# Function to set control plane node IP
+set_control_plane_node_ip() {
+    if [[ -n "${1:-}" ]]; then
+        CONTROL_PLANE_NODE_IP="$1"
+        log "Using provided control plane IP: $CONTROL_PLANE_NODE_IP"
+    else
+        CONTROL_PLANE_NODE_IP=$(get_first_non_loopback_ip)
+        log "Auto-detected control plane IP: $CONTROL_PLANE_NODE_IP"
+    fi
+}
+
 # Function to perform upgrade
 perform_upgrade() {
   log "Performing system upgrade."
@@ -65,9 +69,9 @@ enable_cockpit() {
 
 # Function to disable swap
 disable_swap() {
-  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-controlplane || error_exit "Failed to create new service."
+  log "Disabling swap."
   sudo swapoff -a
-  sudo firewall-cmd --permanent --add-service=k8s-controlplane || error_exit "Failed to add service to firewall."
+  sudo sed -i '/swap/d' /etc/fstab
   sudo sed -i 's/^\/dev\/mapper\/centos-swap/#\/dev\/mapper\/centos-swap/' /etc/fstab
   sudo swapoff /dev/mapper/centos-swap || true
 }
@@ -79,9 +83,9 @@ configure_firewall() {
   # for port in "${ports[@]}"; do
   #   sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
   # done
-  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-control-plane || error_exit "Failed to create new service."
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-controlplane || error_exit "Failed to create new service."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
-  sudo firewall-cmd --permanent --add-service=k8s-control-plane || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-controlplane || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
@@ -89,9 +93,13 @@ configure_firewall() {
 # Function to verify firewall ports
 verify_firewall_ports() {
   log "Verifying firewall ports."
-  local ports=(6443 2379 2380 10250 10251 10252 10255)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "Port $port is not open."
+  local tcp_ports=(6443 2379 2380 10250 10251 10252 10255 10256 10257 10259 4240 4244 4245 9962 9963 9964)
+  local udp_ports=(500 4500 8472 6081)
+  for port in "${tcp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "TCP Port $port is not open."
+  done
+  for port in "${udp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/udp" || echo "UDP Port $port is not open."
   done
 }
 
@@ -199,8 +207,8 @@ EOF
 # Function to set SELinux to permissive mode
 set_selinux_permissive() {
   log "Setting SELinux to permissive mode."
-  sudo setenforce 0 || error_exit "Failed to set SELinux to permissive mode."
-  sudo sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config || error_exit "Failed to update SELinux config file."
+  sudo setenforce 0 || error_exit "Failed to set SELinux to ${SELINUX_MODE} mode."
+  sudo sed -i "s/^SELINUX=enforcing/SELINUX=${SELINUX_MODE}/" /etc/selinux/config || error_exit "Failed to update SELinux config file."
 }
 
 # Function to install Kubernetes packages
@@ -233,7 +241,7 @@ update_kubeadm_config() {
         exit 1
     fi
 
-  sed -i "s/{CONTROL_PLANE_NODE_IP}/$CONTROL_PLANE_NODE_IP/g" "$K8_INIT_FILE"
+    sed -i "s/{YOUR_CONTROL_PLANE_NODE_IP}/$CONTROL_PLANE_NODE_IP/g" "$K8_INIT_FILE"
     sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
 
     echo "kubeadm config file updated successfully."
@@ -308,10 +316,10 @@ configure_ipvs() {
 # Function to increase nofile limits to 1048576
 increase_nofile_limits() {
     log "Increasing nofile limits..."
-    grep -q "* soft nofile 1048576" /etc/security/limits.conf || echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    grep -q "* hard nofile 1048576" /etc/security/limits.conf || echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
-    grep -q "session required pam_limits.so" /etc/pam.d/common-session || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
-    grep -q "fs.file-max = 1048576" /etc/sysctl.conf || echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+    grep -q "* soft nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* soft nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+    grep -q "* hard nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* hard nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+    grep -q "session required pam_limits.so" /etc/pam.d/system-auth || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/system-auth
+    grep -q "fs.file-max = ${NOFILE_LIMIT}" /etc/sysctl.conf || echo "fs.file-max = ${NOFILE_LIMIT}" | sudo tee -a /etc/sysctl.conf
     sudo sysctl -p
     log "Nofile limits increased successfully."
 }
@@ -346,12 +354,13 @@ main() {
   check_root
   install_dependencies
   log "Starting Kubernetes control plane node setup."
+  set_control_plane_node_ip "$@"
   perform_upgrade
   increase_nofile_limits
   enable_cockpit
   disable_swap
   configure_ipvs
-  # configure_firewall
+  configure_firewall
   verify_firewall_ports
   install_containerd
   create_containerd_service

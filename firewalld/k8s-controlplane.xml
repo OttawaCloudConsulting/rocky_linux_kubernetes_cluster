@@ -13,4 +13,17 @@
   <port protocol="tcp" port="10255"/>
   <port protocol="tcp" port="10257"/>
   <port protocol="tcp" port="10259"/>
+  <!-- kube-proxy (if using kube-proxy) -->
+  <port protocol="tcp" port="10256"/>
+  <!-- VXLAN overlay networking -->
+  <port protocol="udp" port="8472"/>
+  <!-- Geneve overlay (alternative to VXLAN) -->
+  <port protocol="udp" port="6081"/>
+  <!-- Cilium and Hubble ports -->
+  <port protocol="tcp" port="4240"/>
+  <port protocol="tcp" port="4244"/>
+  <port protocol="tcp" port="4245"/>
+  <port protocol="tcp" port="9962"/>
+  <port protocol="tcp" port="9963"/>
+  <port protocol="tcp" port="9964"/>
 </service>

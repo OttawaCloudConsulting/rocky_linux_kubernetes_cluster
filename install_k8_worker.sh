@@ -1,19 +1,3 @@
-# Function to check and install required dependencies
-install_dependencies() {
-  local deps=(wget tar curl gpg)
-  local missing=()
-  for dep in "${deps[@]}"; do
-    if ! command -v "$dep" &>/dev/null; then
-      missing+=("$dep")
-    fi
-  done
-  if [ ${#missing[@]} -gt 0 ]; then
-    log "Installing missing dependencies: ${missing[*]}"
-    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
-  else
-    log "All required dependencies are already installed."
-  fi
-}
 #!/bin/bash
 #
 # install_k8_worker.sh
@@ -24,13 +8,8 @@ install_dependencies() {
 
 set -eux
 
-LOG_FILE="/var/log/k8s_install.log"
-CONTAINERD_VERSION="2.1.4"
-RUNC_VERSION="v1.3.1"
-CNI_PLUGINS_VERSION="1.8.0"
-K8S_VERSION_MINOR="1.34"
-K8S_VERSION_PATCH="1.34.0"
-CONTAINERD_BIN="/usr/local/bin/containerd"
+# Source shared configuration
+source ./k8s-config.conf || { echo "Failed to load configuration"; exit 1; }
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -65,6 +44,12 @@ perform_upgrade() {
   sudo dnf -y install jq || error_exit "Failed to install jq."
 }
 
+# Function to enable cockpit
+enable_cockpit() {
+  log "Enabling cockpit."
+  sudo systemctl enable --now cockpit.socket || error_exit "Failed to enable cockpit."
+}
+
 # Function to disable swap
 disable_swap() {
   log "Disabling swap."
@@ -77,17 +62,24 @@ disable_swap() {
 # Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
-  # Main Kubernetes ports
-  local tcp_ports=(10250 30000-32767 9962) # 9962 for Hubble UI
-  # Common CNI plugin ports (as ranges)
-  local udp_ports=(8285-8472 4789 6783-6784)
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_WORKER_FILE --name=k8s-worker || error_exit "Failed to create new service."
+  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-worker || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+}
+
+# Function to verify firewall ports
+verify_firewall_ports() {
+  log "Verifying firewall ports."
+  local tcp_ports=(10250 10256 4240 4244 4245 9962 9963 9964)
+  local udp_ports=(8472 6081 4789)
   for port in "${tcp_ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add TCP port $port to firewall."
+    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "TCP Port $port is not open."
   done
   for port in "${udp_ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/udp" --permanent || error_exit "Failed to add UDP port $port to firewall."
+    sudo firewall-cmd --zone=public --query-port="${port}/udp" || echo "UDP Port $port is not open."
   done
-  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
 
 # Function to install containerd
@@ -175,8 +167,8 @@ EOF
 # Function to set SELinux to permissive mode
 set_selinux_permissive() {
   log "Setting SELinux to permissive mode."
-  sudo setenforce 0 || error_exit "Failed to set SELinux to permissive mode."
-  sudo sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config || error_exit "Failed to update SELinux config file."
+  sudo setenforce 0 || error_exit "Failed to set SELinux to ${SELINUX_MODE} mode."
+  sudo sed -i "s/^SELINUX=enforcing/SELINUX=${SELINUX_MODE}/" /etc/selinux/config || error_exit "Failed to update SELinux config file."
 }
 
 # Function to install Kubernetes packages
@@ -224,12 +216,29 @@ configure_ipvs() {
 # Function to increase nofile limits to 1048576
 increase_nofile_limits() {
   log "Increasing nofile limits..."
-  grep -q "* soft nofile 1048576" /etc/security/limits.conf || echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
-  grep -q "* hard nofile 1048576" /etc/security/limits.conf || echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
-  grep -q "session required pam_limits.so" /etc/pam.d/common-session || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/common-session
-  grep -q "fs.file-max = 1048576" /etc/sysctl.conf || echo "fs.file-max = 1048576" | sudo tee -a /etc/sysctl.conf
+  grep -q "* soft nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* soft nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+  grep -q "* hard nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* hard nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+  grep -q "session required pam_limits.so" /etc/pam.d/system-auth || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/system-auth
+  grep -q "fs.file-max = ${NOFILE_LIMIT}" /etc/sysctl.conf || echo "fs.file-max = ${NOFILE_LIMIT}" | sudo tee -a /etc/sysctl.conf
   sudo sysctl -p
   log "Nofile limits increased successfully."
+}
+
+# Function to check and install required dependencies
+install_dependencies() {
+  local deps=(wget tar curl gpg)
+  local missing=()
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    log "Installing missing dependencies: ${missing[*]}"
+    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
+  else
+    log "All required dependencies are already installed."
+  fi
 }
 
 main() {
@@ -237,10 +246,12 @@ main() {
   install_dependencies
   log "Starting Kubernetes worker node setup."
   perform_upgrade
+  enable_cockpit
   disable_swap
   increase_nofile_limits
   configure_ipvs
   configure_firewall
+  verify_firewall_ports
   install_containerd
   create_containerd_service
   install_runc
