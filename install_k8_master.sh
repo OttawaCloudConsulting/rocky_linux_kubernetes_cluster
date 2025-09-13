@@ -271,29 +271,6 @@ configure_kubectl_for_users() {
   log "Configured kubectl for root."
 }
 
-# Function to install the Calico pod network add-on
-install_pod_network() {
-  log "Installing Calico pod network add-on."
-  kubectl apply -f "https://docs.projectcalico.org/manifests/calico.yaml" || error_exit "Failed to install Calico pod network add-on."
-}
-
-# Function to display Kubernetes cluster information and check Calico pod status
-display_cluster_info() {
-  log "Displaying Kubernetes cluster information."
-  kubectl cluster-info | sudo tee -a "$LOG_FILE"
-  sleep 5
-  log "Checking the status of the Calico pod network."
-  while true; do
-    calico_status=$(kubectl get pods -n kube-system -l k8s-app=calico-node -o jsonpath='{.items[0].status.phase}')
-    echo "Calico pod status: $calico_status"
-    if [[ "$calico_status" == "Running" ]]; then
-      log "Calico pod is running."
-      kubectl get pods -n kube-system -l k8s-app=calico-node | tee -a "$LOG_FILE"
-      break
-    fi
-    sleep 5
-  done
-}
 
 # Function to create a new kubeadm token and display the join command
 create_kubeadm_token() {
@@ -389,8 +366,8 @@ main() {
   update_kubeadm_config
   initialize_cluster
   configure_kubectl_for_users
-  install_pod_network
-  display_cluster_info
+  # install_pod_network (removed for Cilium)
+  # display_cluster_info (removed for Cilium)
   create_kubeadm_token
   log "Kubernetes master node setup completed."
 }

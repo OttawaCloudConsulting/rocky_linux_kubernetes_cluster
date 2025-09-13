@@ -78,7 +78,7 @@ disable_swap() {
 configure_firewall() {
   log "Configuring firewall."
   # Main Kubernetes ports
-  local tcp_ports=(10250 30000-32767)
+  local tcp_ports=(10250 30000-32767 9962) # 9962 for Hubble UI
   # Common CNI plugin ports (as ranges)
   local udp_ports=(8285-8472 4789 6783-6784)
   for port in "${tcp_ports[@]}"; do
