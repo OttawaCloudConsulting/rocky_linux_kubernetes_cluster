@@ -65,11 +65,20 @@ parse_hostname() {
     fi
 }
 
-# Function to calculate IP addresses based on node type and number
-calculate_ip_addresses() {
-    local node_type="$1"
-    local last_digit="$2"
+# Function to calculate IP addresses for a specific VLAN based on node type and number
+calculate_vlan_ip_addresses() {
+    local vlan_id="$1"
+    local node_type="$2"
+    local last_digit="$3"
     local primary_octet secondary_octet
+    
+    # Get VLAN network configuration
+    local vlan_config="${VLAN_CONFIGS[$vlan_id]:-}"
+    if [[ -z "$vlan_config" ]]; then
+        die "VLAN $vlan_id not found in VLAN_CONFIGS"
+    fi
+    
+    IFS=':' read -r network_cidr gateway_ip dns_ip <<< "$vlan_config"
     
     case "$node_type" in
         "worker")
@@ -88,16 +97,16 @@ calculate_ip_addresses() {
     # Validate octet ranges
     for octet in "$primary_octet" "$secondary_octet"; do
         if [[ $octet -lt 1 || $octet -gt 254 ]]; then
-            die "Calculated IP octet $octet is out of valid range (1-254)"
+            die "Calculated IP octet $octet is out of valid range (1-254) for VLAN $vlan_id"
         fi
     done
     
-    # Create IP addresses by substituting {} in MANAGEMENT_CIDR template
-    local primary_ip="${MANAGEMENT_CIDR//\{\}/$primary_octet}"
-    local secondary_ip="${MANAGEMENT_CIDR//\{\}/$secondary_octet}"
+    # Create IP addresses by substituting {} in network CIDR template
+    local primary_ip="${network_cidr//\{\}/$primary_octet}"
+    local secondary_ip="${network_cidr//\{\}/$secondary_octet}"
     
-    log "Calculated IPs - Primary: $primary_ip, Secondary: $secondary_ip"
-    echo "$primary_ip:$secondary_ip"
+    verbose_log "VLAN $vlan_id IPs - Primary: $primary_ip, Secondary: $secondary_ip, Gateway: $gateway_ip, DNS: $dns_ip"
+    echo "$primary_ip:$secondary_ip:$gateway_ip:$dns_ip"
 }
 
 # NetworkManager helper functions
@@ -135,45 +144,41 @@ nm_del_by_device() {
 configure_vlan_interface() {
     local parent_if="$1"
     local vlan_id="$2"
-    local ip_address="$3"  # Can be empty for no IP
-    local interface_name="$4"  # "primary" or "secondary"
+    local ip_address="$3"
+    local gateway_ip="$4"
+    local dns_ip="$5"
+    local interface_name="$6"  # "primary" or "secondary"
+    local is_mgmt_vlan="$7"    # "yes" or "no"
     
     local vlan_dev="${parent_if}.${vlan_id}"
     local vlan_con="vlan${vlan_id}-${parent_if}-${interface_name}"
     
-    if [[ -n "$ip_address" ]]; then
-        log "Configuring $interface_name interface: $vlan_con ($vlan_dev) with IP $ip_address"
-    else
-        log "Configuring $interface_name interface: $vlan_con ($vlan_dev) without IP"
-    fi
+    log "Configuring $interface_name interface: $vlan_con ($vlan_dev) with IP $ip_address"
     
     # Clean existing configurations
     nm_del_by_name "$vlan_con"
     nm_del_by_device "$vlan_dev"
     
-    # Create VLAN interface
-    if [[ -n "$ip_address" ]]; then
-        # With static IP
-        sudo nmcli con add type vlan ifname "$vlan_dev" dev "$parent_if" id "$vlan_id" \
-            con-name "$vlan_con" ip4 "$ip_address" gw4 "$GATEWAY_IP"
-        sudo nmcli con mod "$vlan_con" \
-            ipv4.method manual ipv6.method ignore \
-            ipv4.dns "$DNS_SERVERS" connection.autoconnect yes
+    # Create VLAN interface with static IP
+    sudo nmcli con add type vlan ifname "$vlan_dev" dev "$parent_if" id "$vlan_id" \
+        con-name "$vlan_con" ip4 "$ip_address"
+    
+    # Configure connection properties
+    sudo nmcli con mod "$vlan_con" \
+        ipv4.method manual ipv6.method ignore \
+        ipv4.dns "$dns_ip" connection.autoconnect yes
+    
+    # Only set gateway for management VLAN to avoid routing conflicts
+    if [[ "$is_mgmt_vlan" == "yes" ]]; then
+        sudo nmcli con mod "$vlan_con" gw4 "$gateway_ip"
+        verbose_log "Set gateway $gateway_ip for management VLAN $vlan_id"
     else
-        # Without IP (for MetalLB presence)
-        sudo nmcli con add type vlan ifname "$vlan_dev" dev "$parent_if" id "$vlan_id" \
-            con-name "$vlan_con"
-        sudo nmcli con mod "$vlan_con" \
-            ipv4.method disabled ipv6.method ignore connection.autoconnect yes
+        verbose_log "Skipping gateway for non-management VLAN $vlan_id"
     fi
     
     # Bring up the interface
     if ! sudo nmcli con up "$vlan_con"; then
-        if [[ -n "$ip_address" ]]; then
-            die "Failed to bring up $vlan_con with IP $ip_address. Check for IP conflicts."
-        else
-            log "Warning: Failed to bring up $vlan_con (no IP configured)"
-        fi
+        die "Failed to bring up $vlan_con with IP $ip_address. Check for IP conflicts."
     fi
     
     verbose_log "Successfully configured $vlan_con"
@@ -211,13 +216,7 @@ main() {
     node_info="$(parse_hostname "$hostname")"
     IFS=':' read -r node_type node_number last_digit <<< "$node_info"
     
-    # Calculate IP addresses
-    local ip_info
-    ip_info="$(calculate_ip_addresses "$node_type" "$last_digit")"
-    IFS=':' read -r primary_ip secondary_ip <<< "$ip_info"
-    
     log "Node configuration: Type=$node_type, Number=$node_number"
-    log "IP assignment: Primary=$primary_ip, Secondary=$secondary_ip"
     
     # Ensure VLAN kernel support
     verbose_log "Loading 8021q kernel module"
@@ -229,16 +228,30 @@ main() {
         remove_dhcp_config "$SECOND_IF"
     fi
     
-    # Configure management VLAN on both interfaces
-    log "Configuring management VLAN $MGMT_VLAN_ID on both interfaces"
-    configure_vlan_interface "$PARENT_IF" "$MGMT_VLAN_ID" "$primary_ip" "primary"
-    configure_vlan_interface "$SECOND_IF" "$MGMT_VLAN_ID" "$secondary_ip" "secondary"
+    # Configure all VLANs on both interfaces
+    log "Configuring VLANs: ${ALL_VLANS[*]}"
     
-    # Configure extra VLANs (no IP) on both interfaces for MetalLB
-    log "Configuring additional VLANs for MetalLB: ${EXTRA_VLANS[*]}"
-    for vlan_id in "${EXTRA_VLANS[@]}"; do
-        configure_vlan_interface "$PARENT_IF" "$vlan_id" "" "primary"
-        configure_vlan_interface "$SECOND_IF" "$vlan_id" "" "secondary"
+    declare -A configured_vlans_primary
+    declare -A configured_vlans_secondary
+    
+    for vlan_id in "${ALL_VLANS[@]}"; do
+        # Calculate IP addresses for this VLAN
+        local vlan_info
+        vlan_info="$(calculate_vlan_ip_addresses "$vlan_id" "$node_type" "$last_digit")"
+        IFS=':' read -r primary_ip secondary_ip gateway_ip dns_ip <<< "$vlan_info"
+        
+        # Determine if this is the management VLAN
+        local is_mgmt_vlan="no"
+        [[ "$vlan_id" == "$MGMT_VLAN_ID" ]] && is_mgmt_vlan="yes"
+        
+        log "Configuring VLAN $vlan_id - Primary: $primary_ip, Secondary: $secondary_ip"
+        
+        # Configure on both interfaces
+        configure_vlan_interface "$PARENT_IF" "$vlan_id" "$primary_ip" "$gateway_ip" "$dns_ip" "primary" "$is_mgmt_vlan"
+        configure_vlan_interface "$SECOND_IF" "$vlan_id" "$secondary_ip" "$gateway_ip" "$dns_ip" "secondary" "$is_mgmt_vlan"
+        
+        configured_vlans_primary[$vlan_id]="$primary_ip"
+        configured_vlans_secondary[$vlan_id]="$secondary_ip"
     done
     
     # Display results
@@ -248,10 +261,26 @@ main() {
     echo "========================================="
     echo
     echo "Primary Interface ($PARENT_IF) Results:"
-    ip -4 addr show "${PARENT_IF}.${MGMT_VLAN_ID}" 2>/dev/null | sed 's/^/  /' || echo "  Interface not found"
+    for vlan_id in "${ALL_VLANS[@]}"; do
+        local vlan_dev="${PARENT_IF}.${vlan_id}"
+        if ip -4 addr show "$vlan_dev" &>/dev/null; then
+            echo "  VLAN $vlan_id (${configured_vlans_primary[$vlan_id]}):"
+            ip -4 addr show "$vlan_dev" | grep inet | sed 's/^/    /'
+        else
+            echo "  VLAN $vlan_id: Interface not found"
+        fi
+    done
     echo
     echo "Secondary Interface ($SECOND_IF) Results:"
-    ip -4 addr show "${SECOND_IF}.${MGMT_VLAN_ID}" 2>/dev/null | sed 's/^/  /' || echo "  Interface not found"
+    for vlan_id in "${ALL_VLANS[@]}"; do
+        local vlan_dev="${SECOND_IF}.${vlan_id}"
+        if ip -4 addr show "$vlan_dev" &>/dev/null; then
+            echo "  VLAN $vlan_id (${configured_vlans_secondary[$vlan_id]}):"
+            ip -4 addr show "$vlan_dev" | grep inet | sed 's/^/    /'
+        else
+            echo "  VLAN $vlan_id: Interface not found"
+        fi
+    done
     echo
     echo "Default Route:"
     ip route show default | head -n 1 | sed 's/^/  /' || echo "  No default route found"
@@ -259,7 +288,7 @@ main() {
     echo "Active VLAN Interfaces:"
     for interface in "$PARENT_IF" "$SECOND_IF"; do
         echo "  $interface VLANs:"
-        for vlan_id in "$MGMT_VLAN_ID" "${EXTRA_VLANS[@]}"; do
+        for vlan_id in "${ALL_VLANS[@]}"; do
             local vlan_dev="${interface}.${vlan_id}"
             if ip link show "$vlan_dev" &>/dev/null; then
                 echo "    ✓ $vlan_dev"
@@ -271,20 +300,24 @@ main() {
     
     echo
     echo "========================================="
-    echo "Configuration Notes:"
+    echo "Configuration Summary:"
     echo "========================================="
-    echo "• Primary management IP: $primary_ip"
-    echo "• Secondary management IP: $secondary_ip"  
-    echo "• SSH access available on both IPs"
     echo "• Node type: $node_type"
-    echo "• Additional VLANs configured for MetalLB: ${EXTRA_VLANS[*]}"
+    echo "• Management VLAN: $MGMT_VLAN_ID"
+    echo "• Primary management IP: ${configured_vlans_primary[$MGMT_VLAN_ID]}"
+    echo "• Secondary management IP: ${configured_vlans_secondary[$MGMT_VLAN_ID]}"
+    echo "• SSH access available on both management IPs"
+    echo "• All VLANs configured: ${ALL_VLANS[*]}"
     if [[ "${REMOVE_DHCP_ON_SECOND:-no}" == "yes" ]]; then
         echo "• DHCP removed from $SECOND_IF as requested"
     else
         echo "• DHCP preserved on $SECOND_IF"
     fi
-    echo "• Gateway: $GATEWAY_IP"
-    echo "• DNS servers: $DNS_SERVERS"
+    echo
+    echo "VLAN IP Assignments:"
+    for vlan_id in "${ALL_VLANS[@]}"; do
+        echo "  VLAN $vlan_id: Primary=${configured_vlans_primary[$vlan_id]}, Secondary=${configured_vlans_secondary[$vlan_id]}"
+    done
     echo
     
     log "Network configuration completed successfully"
