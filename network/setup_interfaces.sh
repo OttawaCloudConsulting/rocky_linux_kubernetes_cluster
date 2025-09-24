@@ -65,12 +65,53 @@ parse_hostname() {
     fi
 }
 
+# Function to calculate management IP addresses based on node type and management VLAN
+calculate_management_ip_addresses() {
+    local node_type="$1"
+    local last_digit="$2"
+    local primary_octet secondary_octet
+    
+    case "$node_type" in
+        "worker")
+            primary_octet=$((WORKER_PRIMARY_BASE + last_digit))
+            secondary_octet=$((WORKER_SECONDARY_BASE + last_digit))
+            ;;
+        "control-plane")
+            primary_octet=$((CONTROL_PLANE_PRIMARY_BASE + last_digit))
+            secondary_octet=$((CONTROL_PLANE_SECONDARY_BASE + last_digit))
+            ;;
+        *)
+            die "Unknown node type: $node_type"
+            ;;
+    esac
+    
+    # Validate octet ranges
+    for octet in "$primary_octet" "$secondary_octet"; do
+        if [[ $octet -lt 1 || $octet -gt 254 ]]; then
+            die "Calculated IP octet $octet is out of valid range (1-254) for management network"
+        fi
+    done
+    
+    # Use MANAGEMENT_CIDR for management IP calculation
+    local primary_mgmt_ip="${MANAGEMENT_CIDR//\{\}/$primary_octet}"
+    local secondary_mgmt_ip="${MANAGEMENT_CIDR//\{\}/$secondary_octet}"
+    
+    verbose_log "Management IPs - Primary: $primary_mgmt_ip, Secondary: $secondary_mgmt_ip"
+    echo "$primary_mgmt_ip:$secondary_mgmt_ip:$GATEWAY_IP:${DNS_SERVERS%% *}"
+}
+
 # Function to calculate IP addresses for a specific VLAN based on node type and number
 calculate_vlan_ip_addresses() {
     local vlan_id="$1"
     local node_type="$2"
     local last_digit="$3"
     local primary_octet secondary_octet
+    
+    # Special handling for management VLAN - use management-specific configuration
+    if [[ "$vlan_id" == "$MGMT_VLAN_ID" ]]; then
+        calculate_management_ip_addresses "$node_type" "$last_digit"
+        return 0
+    fi
     
     # Get VLAN network configuration
     local vlan_config="${VLAN_CONFIGS[$vlan_id]:-}"
@@ -244,11 +285,22 @@ main() {
         local is_mgmt_vlan="no"
         [[ "$vlan_id" == "$MGMT_VLAN_ID" ]] && is_mgmt_vlan="yes"
         
-        log "Configuring VLAN $vlan_id - Primary: $primary_ip, Secondary: $secondary_ip"
+        if [[ "$is_mgmt_vlan" == "yes" ]]; then
+            log "Configuring MANAGEMENT VLAN $vlan_id - Primary: $primary_ip (PRIORITY), Secondary: $secondary_ip"
+        else
+            log "Configuring VLAN $vlan_id - Primary: $primary_ip, Secondary: $secondary_ip"
+        fi
         
-        # Configure on both interfaces
+        # Configure primary interface first (higher priority for management)
         configure_vlan_interface "$PARENT_IF" "$vlan_id" "$primary_ip" "$gateway_ip" "$dns_ip" "primary" "$is_mgmt_vlan"
-        configure_vlan_interface "$SECOND_IF" "$vlan_id" "$secondary_ip" "$gateway_ip" "$dns_ip" "secondary" "$is_mgmt_vlan"
+        
+        # Configure secondary interface with lower metric for management VLAN
+        if [[ "$is_mgmt_vlan" == "yes" ]]; then
+            configure_vlan_interface "$SECOND_IF" "$vlan_id" "$secondary_ip" "$gateway_ip" "$dns_ip" "secondary" "no"
+            verbose_log "Management VLAN: Primary interface ($PARENT_IF) has routing priority"
+        else
+            configure_vlan_interface "$SECOND_IF" "$vlan_id" "$secondary_ip" "$gateway_ip" "$dns_ip" "secondary" "$is_mgmt_vlan"
+        fi
         
         configured_vlans_primary[$vlan_id]="$primary_ip"
         configured_vlans_secondary[$vlan_id]="$secondary_ip"
@@ -303,9 +355,12 @@ main() {
     echo "Configuration Summary:"
     echo "========================================="
     echo "• Node type: $node_type"
-    echo "• Management VLAN: $MGMT_VLAN_ID"
-    echo "• Primary management IP: ${configured_vlans_primary[$MGMT_VLAN_ID]}"
-    echo "• Secondary management IP: ${configured_vlans_secondary[$MGMT_VLAN_ID]}"
+    echo "• Management VLAN: $MGMT_VLAN_ID (${MANAGEMENT_CIDR})"
+    echo "• PRIMARY management IP (for K8s): ${configured_vlans_primary[$MGMT_VLAN_ID]} on $PARENT_IF"
+    echo "• Secondary management IP: ${configured_vlans_secondary[$MGMT_VLAN_ID]} on $SECOND_IF"
+    echo "• Management gateway: $GATEWAY_IP"
+    echo "• Kubernetes NODE IP: ${configured_vlans_primary[$MGMT_VLAN_ID]%/*} (kubelet --node-ip)"
+    echo "• Kubelet auto-config: ${KUBELET_AUTO_CONFIG:-yes} (via /etc/sysconfig/kubelet)"
     echo "• SSH access available on both management IPs"
     echo "• All VLANs configured: ${ALL_VLANS[*]}"
     if [[ "${REMOVE_DHCP_ON_SECOND:-no}" == "yes" ]]; then
@@ -320,7 +375,132 @@ main() {
     done
     echo
     
+    # Final kubelet validation if enabled
+    if [[ "${KUBELET_AUTO_CONFIG:-yes}" == "yes" ]] && command -v kubelet >/dev/null 2>&1; then
+        echo "Kubelet Node IP Validation:"
+        local expected_node_ip="${configured_vlans_primary[$MGMT_VLAN_ID]%/*}"
+        if [[ -f /etc/sysconfig/kubelet ]]; then
+            local sysconfig_ip=$(grep "node-ip" /etc/sysconfig/kubelet 2>/dev/null | grep -o "[0-9.]*" | head -1)
+            if [[ "$sysconfig_ip" == "$expected_node_ip" ]]; then
+                echo "  ✓ /etc/sysconfig/kubelet correctly configured: $sysconfig_ip"
+            else
+                echo "  ⚠ /etc/sysconfig/kubelet mismatch: $sysconfig_ip (expected: $expected_node_ip)"
+            fi
+        else
+            echo "  ⚠ /etc/sysconfig/kubelet not found"
+        fi
+        
+        if sudo systemctl is-active kubelet >/dev/null 2>&1; then
+            echo "  ✓ Kubelet service is active"
+        else
+            echo "  ⚠ Kubelet service is not active"
+        fi
+        echo
+    fi
+    
+    # Configure kubelet node IP if enabled and kubelet is installed
+    if [[ "${KUBELET_AUTO_CONFIG:-yes}" == "yes" ]]; then
+        configure_kubelet_node_ip "$node_type" "$last_digit"
+    else
+        verbose_log "Kubelet auto-configuration disabled (KUBELET_AUTO_CONFIG=no)"
+    fi
+    
     log "Network configuration completed successfully"
+}
+
+# Function to configure kubelet with the primary management IP using sysconfig method
+configure_kubelet_node_ip() {
+    local node_type="$1"
+    local last_digit="$2"
+    
+    # Check if kubelet is installed
+    if ! command -v kubelet >/dev/null 2>&1; then
+        verbose_log "Kubelet not found, skipping kubelet configuration"
+        return 0
+    fi
+    
+    # Calculate primary management IP
+    local primary_octet
+    case "$node_type" in
+        "worker")
+            primary_octet=$((WORKER_PRIMARY_BASE + last_digit))
+            ;;
+        "control-plane")
+            primary_octet=$((CONTROL_PLANE_PRIMARY_BASE + last_digit))
+            ;;
+        *)
+            verbose_log "Unknown node type for kubelet config: $node_type"
+            return 0
+            ;;
+    esac
+    
+    local management_ip="${MANAGEMENT_CIDR//\{\}/$primary_octet}"
+    local node_ip="${management_ip%/*}"  # Remove CIDR notation
+    
+    log "Configuring kubelet to use PRIMARY management IP: $node_ip"
+    
+    # Use sysconfig method (proper kubeadm approach)
+    local sysconfig_file="/etc/sysconfig/kubelet"
+    
+    # Backup existing sysconfig file if it exists
+    if [[ -f "$sysconfig_file" ]]; then
+        local backup_file="${sysconfig_file}.backup-$(date +%Y%m%d-%H%M%S)"
+        sudo cp "$sysconfig_file" "$backup_file"
+        verbose_log "Backed up existing $sysconfig_file to $backup_file"
+    fi
+    
+    # Create or update /etc/sysconfig/kubelet with node-ip
+    cat << EOF | sudo tee "$sysconfig_file" >/dev/null
+# Kubernetes kubelet configuration
+# This file is sourced by systemd kubelet service via kubeadm
+KUBELET_EXTRA_ARGS="--node-ip=$node_ip"
+EOF
+    
+    log "✓ Updated $sysconfig_file with node-ip: $node_ip"
+    
+    # Remove any conflicting systemd environment files
+    local systemd_node_ip_file="/etc/systemd/system/kubelet.service.d/11-node-ip.conf"
+    if [[ -f "$systemd_node_ip_file" ]]; then
+        sudo rm "$systemd_node_ip_file"
+        log "Removed conflicting systemd environment file: $systemd_node_ip_file"
+    fi
+    
+    # Reload systemd configuration
+    sudo systemctl daemon-reload
+    verbose_log "Reloaded systemd configuration"
+    
+    # Restart kubelet if it's currently running
+    if sudo systemctl is-active kubelet >/dev/null 2>&1; then
+        log "Restarting kubelet service with new PRIMARY management node IP"
+        sudo systemctl restart kubelet
+        
+        # Wait a moment and verify
+        sleep 5
+        if sudo systemctl is-active kubelet >/dev/null 2>&1; then
+            log "✓ Kubelet successfully restarted with node-ip: $node_ip"
+            
+            # Verify the node-ip is actually in use
+            sleep 2
+            if ps aux | grep kubelet | grep -v grep | grep -q -- "--node-ip=$node_ip"; then
+                log "✓ VERIFIED: kubelet process is using --node-ip=$node_ip"
+            else
+                log "⚠ Warning: --node-ip may not be visible yet in process, check in 1-2 minutes"
+            fi
+        else
+            log "❌ Warning: Kubelet may have failed to restart. Check: systemctl status kubelet"
+        fi
+    else
+        log "Kubelet not currently running, configuration will apply on next start"
+    fi
+    
+    echo
+    echo "Kubelet Configuration (SYSCONFIG METHOD):"
+    echo "• PRIMARY management node IP: $node_ip"
+    echo "• Configuration method: /etc/sysconfig/kubelet (kubeadm standard)"
+    echo "• Kubernetes cluster will use: $node_ip"
+    echo "• To verify: kubectl get nodes -o wide (from control plane)"
+    echo "• Wait 2-3 minutes for cluster re-registration"
+    echo
 }
 
 # Verify we're running as root or with sudo
