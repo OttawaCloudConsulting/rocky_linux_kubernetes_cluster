@@ -242,6 +242,7 @@ update_kubeadm_config() {
     fi
 
     sed -i "s/{YOUR_CONTROL_PLANE_NODE_IP}/$CONTROL_PLANE_NODE_IP/g" "$K8_INIT_FILE"
+    sed -i "s/{CONTROL_PLANE_ENDPOINT}/$CONTROL_PLANE_NODE_IP:6443/g" "$K8_INIT_FILE"
     sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
 
     echo "kubeadm config file updated successfully."

@@ -4,7 +4,12 @@
 # Supports both worker and control-plane nodes with configurable parameters
 # - Computes IP addresses based on hostname and node type
 # - Configures both primary and secondary interfaces with VLANs
+# - Configures rp_filter for cross-VLAN communication (CRITICAL!)
 # - All settings externalized to network/interfaces.conf
+#
+# IMPORTANT: This script now includes rp_filter configuration to prevent
+# cross-VLAN connectivity issues on bare metal nodes with VLAN trunking.
+# Without rp_filter=2 (loose mode), cross-VLAN replies will be dropped.
 
 set -euo pipefail
 
@@ -243,6 +248,69 @@ remove_dhcp_config() {
     fi
 }
 
+# Function to configure reverse path filter for multi-VLAN routing
+configure_rp_filter() {
+    log "Configuring reverse path filter (rp_filter) for multi-VLAN routing"
+    
+    # Set rp_filter to loose mode (2) - REQUIRED for cross-VLAN communication with source-based routing
+    # rp_filter modes:
+    #   0 = Disabled (no reverse path validation)
+    #   1 = Strict mode (drop if reply from unexpected interface) - BREAKS cross-VLAN
+    #   2 = Loose mode (only drop if no route to source exists) - REQUIRED
+    
+    verbose_log "Setting rp_filter to loose mode (2)"
+    sudo sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null
+    sudo sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null
+    
+    # Create persistent configuration
+    local sysctl_conf="/etc/sysctl.d/99-vlan-routing-rp_filter.conf"
+    
+    cat | sudo tee "$sysctl_conf" >/dev/null << 'EOF'
+# Reverse Path Filter Configuration for Multi-VLAN Routing
+# Required for cross-VLAN communication with source-based routing on bare metal
+#
+# CRITICAL: Without rp_filter=2, cross-VLAN replies will be dropped as "spoofed" packets
+#
+# Background:
+#   - Bare metal with VLAN trunking uses sub-interfaces (e.g., enp1s0.44, enp1s0.41)
+#   - Cross-VLAN traffic: Request from VLAN 44 → Router → Reply to VLAN 44
+#   - Reply arrives on VLAN 44 interface from VLAN 41 source IP
+#   - Strict mode (rp_filter=1) checks: "Would traffic TO this source go via THIS interface?"
+#   - Answer: NO, traffic to VLAN 41 uses VLAN 41 interface
+#   - Result: Packet DROPPED as potentially spoofed
+#
+# Solution:
+#   - Loose mode (rp_filter=2) only drops if NO route to source exists
+#   - Allows legitimate cross-VLAN replies through
+#
+# rp_filter modes:
+#   0 = Disabled (no reverse path validation)
+#   1 = Strict mode (drop if reply from unexpected interface) - BREAKS cross-VLAN
+#   2 = Loose mode (only drop if no route to source exists) - REQUIRED
+#
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+EOF
+    
+    # Apply the configuration
+    sudo sysctl -p "$sysctl_conf" >/dev/null
+    
+    log "✓ Reverse path filter configured and persisted to: $sysctl_conf"
+    verbose_log "  net.ipv4.conf.all.rp_filter = $(sysctl -n net.ipv4.conf.all.rp_filter)"
+    verbose_log "  net.ipv4.conf.default.rp_filter = $(sysctl -n net.ipv4.conf.default.rp_filter)"
+    
+    echo
+    echo "========================================="
+    echo "Reverse Path Filter Configuration"
+    echo "========================================="
+    echo "• rp_filter set to LOOSE mode (2)"
+    echo "• Configuration file: $sysctl_conf"
+    echo "• This prevents cross-VLAN reply packets from being dropped"
+    echo "• CRITICAL for multi-VLAN bare metal Kubernetes nodes"
+    echo "========================================="
+    echo
+}
+
 # Main execution
 main() {
     log "Starting Kubernetes node network configuration"
@@ -363,6 +431,7 @@ main() {
     echo "• Kubelet auto-config: ${KUBELET_AUTO_CONFIG:-yes} (via /etc/sysconfig/kubelet)"
     echo "• SSH access available on both management IPs"
     echo "• All VLANs configured: ${ALL_VLANS[*]}"
+    echo "• rp_filter: LOOSE mode (2) - Required for cross-VLAN communication"
     if [[ "${REMOVE_DHCP_ON_SECOND:-no}" == "yes" ]]; then
         echo "• DHCP removed from $SECOND_IF as requested"
     else
@@ -374,6 +443,9 @@ main() {
         echo "  VLAN $vlan_id: Primary=${configured_vlans_primary[$vlan_id]}, Secondary=${configured_vlans_secondary[$vlan_id]}"
     done
     echo
+    
+    # Configure reverse path filter for multi-VLAN routing
+    configure_rp_filter
     
     # Final kubelet validation if enabled
     if [[ "${KUBELET_AUTO_CONFIG:-yes}" == "yes" ]] && command -v kubelet >/dev/null 2>&1; then
