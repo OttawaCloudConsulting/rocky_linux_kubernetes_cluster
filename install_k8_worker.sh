@@ -5,20 +5,16 @@
 # Usage: sudo bash ./install_k8_worker.sh
 # This script requires root privileges.
 
-set -e
-set -u
 
-# Constants
-LOG_FILE="/var/log/k8s_worker_install.log"
-CONTAINERD_VERSION="1.7.9"
-RUNC_VERSION="v1.1.10"
-CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION="1.30"
-CONTAINERD_BIN="/usr/local/bin/containerd"
+set -eux
+
+# Source shared configuration
+source ./k8s-config.conf || { echo "Failed to load configuration"; exit 1; }
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
 
+# Logging function
 # Logging function
 log() {
   local msg="$1"
@@ -32,10 +28,26 @@ error_exit() {
   exit 1
 }
 
+# Check for root
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log "ERROR: This script must be run as root."
+    exit 1
+  fi
+}
+
 # Function to perform upgrade
 perform_upgrade() {
   log "Performing system upgrade."
   sudo dnf -y upgrade || error_exit "System upgrade failed."
+  log "Installing jq dependency."
+  sudo dnf -y install jq || error_exit "Failed to install jq."
+}
+
+# Function to enable cockpit
+enable_cockpit() {
+  log "Enabling cockpit."
+  sudo systemctl enable --now cockpit.socket || error_exit "Failed to enable cockpit."
 }
 
 # Function to disable swap
@@ -50,11 +62,24 @@ disable_swap() {
 # Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
-  local ports=(10250 30000-32767)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
-  done
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_WORKER_FILE --name=k8s-worker || error_exit "Failed to create new service."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-worker || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+}
+
+# Function to verify firewall ports
+verify_firewall_ports() {
+  log "Verifying firewall ports."
+  local tcp_ports=(10250 10256 4240 4244 4245 9962 9963 9964)
+  local udp_ports=(8472 6081 4789)
+  for port in "${tcp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "TCP Port $port is not open."
+  done
+  for port in "${udp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/udp" || echo "UDP Port $port is not open."
+  done
 }
 
 # Function to install containerd
@@ -142,8 +167,8 @@ EOF
 # Function to set SELinux to permissive mode
 set_selinux_permissive() {
   log "Setting SELinux to permissive mode."
-  sudo setenforce 0 || error_exit "Failed to set SELinux to permissive mode."
-  sudo sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config || error_exit "Failed to update SELinux config file."
+  sudo setenforce 0 || error_exit "Failed to set SELinux to ${SELINUX_MODE} mode."
+  sudo sed -i "s/^SELINUX=enforcing/SELINUX=${SELINUX_MODE}/" /etc/selinux/config || error_exit "Failed to update SELinux config file."
 }
 
 # Function to install Kubernetes packages
@@ -154,10 +179,10 @@ install_kubernetes() {
   cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/repodata/repomd.xml.key
 EOF
 
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
@@ -169,11 +194,64 @@ enable_kubelet() {
   sudo systemctl enable --now kubelet || error_exit "Failed to enable kubelet."
 }
 
+# Function to load IPVS modules and configure them to load on boot
+configure_ipvs() {
+  log "Loading IPVS modules..."
+  sudo modprobe ip_vs || error_exit "Failed to load ip_vs module."
+  sudo modprobe ip_vs_rr || error_exit "Failed to load ip_vs_rr module."
+  sudo modprobe ip_vs_wrr || error_exit "Failed to load ip_vs_wrr module."
+  sudo modprobe ip_vs_sh || error_exit "Failed to load ip_vs_sh module."
+  sudo modprobe nf_conntrack || error_exit "Failed to load nf_conntrack module."
+
+  log "Ensuring IPVS modules load on boot..."
+  echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
+
+  log "Verifying loaded modules..."
+  lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+
+  log "IPVS modules are configured and loaded successfully."
+}
+
+
+# Function to increase nofile limits to 1048576
+increase_nofile_limits() {
+  log "Increasing nofile limits..."
+  grep -q "* soft nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* soft nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+  grep -q "* hard nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* hard nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+  grep -q "session required pam_limits.so" /etc/pam.d/system-auth || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/system-auth
+  grep -q "fs.file-max = ${NOFILE_LIMIT}" /etc/sysctl.conf || echo "fs.file-max = ${NOFILE_LIMIT}" | sudo tee -a /etc/sysctl.conf
+  sudo sysctl -p
+  log "Nofile limits increased successfully."
+}
+
+# Function to check and install required dependencies
+install_dependencies() {
+  local deps=(wget tar curl gpg)
+  local missing=()
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    log "Installing missing dependencies: ${missing[*]}"
+    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
+  else
+    log "All required dependencies are already installed."
+  fi
+}
+
 main() {
+  check_root
+  install_dependencies
   log "Starting Kubernetes worker node setup."
   perform_upgrade
+  enable_cockpit
   disable_swap
+  increase_nofile_limits
+  configure_ipvs
   configure_firewall
+  verify_firewall_ports
   install_containerd
   create_containerd_service
   install_runc

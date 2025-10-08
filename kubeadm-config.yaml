@@ -1,0 +1,24 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "{CONTROL_PLANE_NODE_IP}"
+  bindPort: 6443
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+controlPlaneEndpoint: "{CONTROL_PLANE_ENDPOINT}"
+kubernetesVersion: "{YOUR_KUBERNETES_VERSION}"
+networking:
+  podSubnet: "192.168.0.0/16"
+apiServer:
+  extraArgs:
+    authorization-mode: Node,RBAC
+controllerManager:
+  extraArgs:
+    allocate-node-cidrs: "true"
+    cluster-cidr: "192.168.0.0/16"
+scheduler: {}
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: KubeProxyConfiguration
+mode: "ipvs"

@@ -1,22 +1,19 @@
 #!/bin/bash
-# install_k8_master.sh
-# This script installs and configures a Kubernetes master node.
-# Usage: sudo bash ./install_k8_master.sh
+# install_k8_control_plane.sh
+# This script installs and configures a Kubernetes control plane node.
+# Usage: sudo bash ./install_k8_control_plane.sh
+# Usage: sudo bash ./install_k8_control_plane.sh CONTROL_PLANE_ADDRESS=x.x.x.x
 # This script requires root privileges.
 
 
 set -e
 set -u
 
-# Constants
-LOG_FILE="/var/log/k8s_install.log"
-CONTAINERD_VERSION="1.7.9"
-RUNC_VERSION="v1.1.10"
-CNI_PLUGINS_VERSION="1.3.0"
-K8S_VERSION="1.30"
-KUBECONFIG="/etc/kubernetes/admin.conf"
-CONTAINERD_BIN="/usr/local/bin/containerd"
-MASTER_NODE_IP="<master-node-ip>"  # Replace with your master node IP address
+# Source shared configuration
+source ./k8s-config.conf || { echo "Failed to load configuration"; exit 1; }
+
+# Control plane specific variables
+CONTROL_PLANE_NODE_IP=""
 
 # Ensure /usr/local/bin is in the PATH
 export PATH="$PATH:/usr/local/bin"
@@ -32,6 +29,30 @@ error_exit() {
   local msg="$1"
   log "ERROR: $msg"
   exit 1
+}
+
+# Function to get the IP address of the first non-loopback network interface
+get_first_non_loopback_ip() {
+    local ip_address
+    ip_address=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n 1)
+    
+    if [[ -z "$ip_address" ]]; then
+        echo "Error: Could not find a valid IP address for a non-loopback interface."
+        exit 1
+    fi
+
+    echo "$ip_address"
+}
+
+# Function to set control plane node IP
+set_control_plane_node_ip() {
+    if [[ -n "${1:-}" ]]; then
+        CONTROL_PLANE_NODE_IP="$1"
+        log "Using provided control plane IP: $CONTROL_PLANE_NODE_IP"
+    else
+        CONTROL_PLANE_NODE_IP=$(get_first_non_loopback_ip)
+        log "Auto-detected control plane IP: $CONTROL_PLANE_NODE_IP"
+    fi
 }
 
 # Function to perform upgrade
@@ -58,19 +79,27 @@ disable_swap() {
 # Function to configure firewall
 configure_firewall() {
   log "Configuring firewall."
-  local ports=(6443 2379 2380 10250-10252 10255)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
-  done
+  # local ports=(6443 2379 2380 10250-10252 10255)
+  # for port in "${ports[@]}"; do
+  #   sudo firewall-cmd --zone=public --add-port="${port}/tcp" --permanent || error_exit "Failed to add port $port to firewall."
+  # done
+  sudo firewall-cmd --permanent --new-service-from-file=$FIREWALLD_FILE --name=k8s-controlplane || error_exit "Failed to create new service."
+  sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
+  sudo firewall-cmd --permanent --add-service=k8s-controlplane || error_exit "Failed to add service to firewall."
+  sudo firewall-cmd --permanent --add-service=cockpit || error_exit "Failed to add service to firewall."
   sudo firewall-cmd --reload || error_exit "Failed to reload firewall."
 }
 
 # Function to verify firewall ports
 verify_firewall_ports() {
   log "Verifying firewall ports."
-  local ports=(6443 2379 2380 10250 10251 10252 10255)
-  for port in "${ports[@]}"; do
-    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || error_exit "Port $port is not open."
+  local tcp_ports=(6443 2379 2380 10250 10251 10252 10255 10256 10257 10259 4240 4244 4245 9962 9963 9964)
+  local udp_ports=(500 4500 8472 6081)
+  for port in "${tcp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/tcp" || echo "TCP Port $port is not open."
+  done
+  for port in "${udp_ports[@]}"; do
+    sudo firewall-cmd --zone=public --query-port="${port}/udp" || echo "UDP Port $port is not open."
   done
 }
 
@@ -110,6 +139,25 @@ WantedBy=multi-user.target
 EOF
   sudo systemctl daemon-reload || error_exit "Failed to reload systemd."
   sudo systemctl enable --now containerd || error_exit "Failed to enable containerd."
+}
+
+# Function to find the latest version of kubernetes from github releases
+get_latest_kubeadm_version() {
+    echo "Finding the latest version of kubeadm..."
+    TAGS=$(curl -s https://api.github.com/repos/kubernetes/kubernetes/tags | jq -r '.[].name')
+    latest_version=$(echo "$TAGS" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+    if [[ -z "$latest_version" ]]; then
+        echo "Unable to find the latest kubeadm version."
+        exit 1
+    fi
+    echo "Latest kubeadm version found: $latest_version"
+    LATEST_VERSION_NO_PREFIX=${latest_version#v}
+    echo $LATEST_VERSION_NO_PREFIX
+
+    # Extract the patch version (e.g., 1.30.1) from the full version string
+    K8S_VERSION_PATCH=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+\.\d+')
+    # Extract the minor version (e.g., 1.30) from the patch version
+    K8S_VERSION_MINOR=$(echo $LATEST_VERSION_NO_PREFIX | grep -oP '^\d+\.\d+')
 }
 
 # Function to install runc
@@ -159,8 +207,8 @@ EOF
 # Function to set SELinux to permissive mode
 set_selinux_permissive() {
   log "Setting SELinux to permissive mode."
-  sudo setenforce 0 || error_exit "Failed to set SELinux to permissive mode."
-  sudo sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config || error_exit "Failed to update SELinux config file."
+  sudo setenforce 0 || error_exit "Failed to set SELinux to ${SELINUX_MODE} mode."
+  sudo sed -i "s/^SELINUX=enforcing/SELINUX=${SELINUX_MODE}/" /etc/selinux/config || error_exit "Failed to update SELinux config file."
 }
 
 # Function to install Kubernetes packages
@@ -171,10 +219,10 @@ install_kubernetes() {
   cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
 [kubernetes]
 name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/
+baseurl=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/
 enabled=1
 gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml.key
+gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION_MINOR}/rpm/repodata/repomd.xml.key
 EOF
 
   sudo dnf -y install kubeadm kubelet kubectl || error_exit "Failed to install Kubernetes packages."
@@ -186,10 +234,24 @@ enable_kubelet() {
   sudo systemctl enable --now kubelet || error_exit "Failed to enable kubelet."
 }
 
+update_kubeadm_config() {
+    echo "Updating kubeadm config file with actual values..."
+    if [[ ! -f "$K8_INIT_FILE" ]]; then
+        echo "Config file $K8_INIT_FILE does not exist."
+        exit 1
+    fi
+
+    sed -i "s/{YOUR_CONTROL_PLANE_NODE_IP}/$CONTROL_PLANE_NODE_IP/g" "$K8_INIT_FILE"
+    sed -i "s/{CONTROL_PLANE_ENDPOINT}/$CONTROL_PLANE_NODE_IP:6443/g" "$K8_INIT_FILE"
+    sed -i "s/{YOUR_KUBERNETES_VERSION}/$K8S_VERSION_PATCH/g" "$K8_INIT_FILE"
+
+    echo "kubeadm config file updated successfully."
+}
+
 # Function to initialize Kubernetes cluster
 initialize_cluster() {
   log "Initializing Kubernetes cluster."
-  sudo kubeadm init --v=5 || error_exit "Failed to initialize Kubernetes cluster."
+  sudo sudo kubeadm init --config=kubeadm-config.yaml --v=5 || error_exit "Failed to initialize Kubernetes cluster."
 }
 
 # Function to configure kubectl for all users with home directories
@@ -218,29 +280,6 @@ configure_kubectl_for_users() {
   log "Configured kubectl for root."
 }
 
-# Function to install the Calico pod network add-on
-install_pod_network() {
-  log "Installing Calico pod network add-on."
-  kubectl apply -f "https://docs.projectcalico.org/manifests/calico.yaml" || error_exit "Failed to install Calico pod network add-on."
-}
-
-# Function to display Kubernetes cluster information and check Calico pod status
-display_cluster_info() {
-  log "Displaying Kubernetes cluster information."
-  kubectl cluster-info | tee -a "$LOG_FILE"
-  sleep 5
-  log "Checking the status of the Calico pod network."
-  while true; do
-    calico_status=$(kubectl get pods -n kube-system -l k8s-app=calico-node -o jsonpath='{.items[0].status.phase}')
-    echo "Calico pod status: $calico_status"
-    if [[ "$calico_status" == "Running" ]]; then
-      log "Calico pod is running."
-      kubectl get pods -n kube-system -l k8s-app=calico-node | tee -a "$LOG_FILE"
-      break
-    fi
-    sleep 5
-  done
-}
 
 # Function to create a new kubeadm token and display the join command
 create_kubeadm_token() {
@@ -251,21 +290,82 @@ create_kubeadm_token() {
   CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //')
   log "CA certificate hash: $CA_CERT_HASH"
 
-  JOIN_COMMAND="sudo kubeadm join $MASTER_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
+  JOIN_COMMAND="sudo kubeadm join $CONTROL_PLANE_NODE_IP:6443 --token $NEW_TOKEN --discovery-token-ca-cert-hash sha256:$CA_CERT_HASH"
   log "Worker node join command: $JOIN_COMMAND"
   echo "On the worker node, run the following command to join the cluster:"
   echo "$JOIN_COMMAND"
 }
 
+# Function to load IPVS modules and configure them to load on boot
+configure_ipvs() {
+    log "Loading IPVS modules..."
+    sudo modprobe ip_vs || error_exit "Failed to load ip_vs module."
+    sudo modprobe ip_vs_rr || error_exit "Failed to load ip_vs_rr module."
+    sudo modprobe ip_vs_wrr || error_exit "Failed to load ip_vs_wrr module."
+    sudo modprobe ip_vs_sh || error_exit "Failed to load ip_vs_sh module."
+    sudo modprobe nf_conntrack || error_exit "Failed to load nf_conntrack module."
+
+    log "Ensuring IPVS modules load on boot..."
+    echo -e "ip_vs\nip_vs_rr\nip_vs_wrr\nip_vs_sh\nnf_conntrack_ipv4" | sudo tee /etc/modules-load.d/ipvs.conf
+
+    log "Verifying loaded modules..."
+    lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+
+    log "IPVS modules are configured and loaded successfully."
+}
+
+# Function to increase nofile limits to 1048576
+increase_nofile_limits() {
+    log "Increasing nofile limits..."
+    grep -q "* soft nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* soft nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+    grep -q "* hard nofile ${NOFILE_LIMIT}" /etc/security/limits.conf || echo "* hard nofile ${NOFILE_LIMIT}" | sudo tee -a /etc/security/limits.conf
+    grep -q "session required pam_limits.so" /etc/pam.d/system-auth || echo "session required pam_limits.so" | sudo tee -a /etc/pam.d/system-auth
+    grep -q "fs.file-max = ${NOFILE_LIMIT}" /etc/sysctl.conf || echo "fs.file-max = ${NOFILE_LIMIT}" | sudo tee -a /etc/sysctl.conf
+    sudo sysctl -p
+    log "Nofile limits increased successfully."
+}
+
+# Function to check and install required dependencies
+install_dependencies() {
+  local deps=(wget tar curl gpg)
+  local missing=()
+  for dep in "${deps[@]}"; do
+    if ! command -v "$dep" &>/dev/null; then
+      missing+=("$dep")
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    log "Installing missing dependencies: ${missing[*]}"
+    sudo dnf -y install "${missing[@]}" || error_exit "Failed to install required dependencies: ${missing[*]}"
+  else
+    log "All required dependencies are already installed."
+  fi
+}
+
+# Check for root
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log "ERROR: This script must be run as root."
+    exit 1
+  fi
+}
+
+# Main function
 main() {
-  log "Starting Kubernetes master node setup."
+  check_root
+  install_dependencies
+  log "Starting Kubernetes control plane node setup."
+  set_control_plane_node_ip "$@"
   perform_upgrade
+  increase_nofile_limits
   enable_cockpit
   disable_swap
+  configure_ipvs
   configure_firewall
   verify_firewall_ports
   install_containerd
   create_containerd_service
+  get_latest_kubeadm_version
   install_runc
   install_cni_plugins
   configure_containerd
@@ -273,12 +373,13 @@ main() {
   set_selinux_permissive
   install_kubernetes
   enable_kubelet
+  update_kubeadm_config
   initialize_cluster
   configure_kubectl_for_users
-  install_pod_network
-  display_cluster_info
+  # install_pod_network (removed for Cilium)
+  # display_cluster_info (removed for Cilium)
   create_kubeadm_token
-  log "Kubernetes master node setup completed."
+  log "Kubernetes control plane node setup completed."
 }
 
 main "$@"
