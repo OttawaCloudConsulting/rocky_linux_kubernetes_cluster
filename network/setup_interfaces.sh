@@ -446,7 +446,18 @@ main() {
     
     # Configure reverse path filter for multi-VLAN routing
     configure_rp_filter
-    
+
+    # Per-interface rp_filter override (closes VLAN43 RPF pathology — Finding 20).
+    # Source manifest + helpers from this directory and run idempotently.
+    # See network/rp_filter_per_iface.conf and docs/problems/vlan43-error/apply/.
+    if [[ -f "${SCRIPT_DIR}/setup_rp_filter_per_iface.sh" ]]; then
+        # shellcheck disable=SC1091
+        source "${SCRIPT_DIR}/setup_rp_filter_per_iface.sh"
+        setup_rp_filter_per_iface_main
+    else
+        log "WARN: setup_rp_filter_per_iface.sh not found — per-iface rp_filter override skipped"
+    fi
+
     # Final kubelet validation if enabled
     if [[ "${KUBELET_AUTO_CONFIG:-yes}" == "yes" ]] && command -v kubelet >/dev/null 2>&1; then
         echo "Kubelet Node IP Validation:"
