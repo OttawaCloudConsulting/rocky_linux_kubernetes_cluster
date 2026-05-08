@@ -68,27 +68,16 @@ rpf_emit_body() {
     local vlans_str="$3"
 
     case "$node_type" in
-        control-plane)
+        control-plane|worker)
             cat <<'EOF'
-# OCC apply campaign — VLAN43 RPF remediation (per-interface rp_filter=2)
-# Source: docs/problems/vlan43-error/apply/prd.md §Configuration (k8control row)
-# Architecture: docs/problems/vlan43-error/apply/architecture.md Decision #1, #2
-# Sustainment: RECOMMENDATION.md §4 — file name sorts AFTER /usr/lib/sysctl.d/50-redhat.conf
-#              (the wildcard *.rp_filter=1 writer identified by predecessor D-1).
-# Note: per-iface keys are independent of net.ipv4.conf.all.rp_filter (Linux kernel
-#       uses max(all, iface) for RPF; the Cilium override all.rp_filter=0 does NOT
-#       mask the values below on these interfaces).
-EOF
-            ;;
-        worker)
-            cat <<'EOF'
-# OCC apply campaign — VLAN43 RPF remediation (per-interface rp_filter=2)
-# Source: docs/problems/vlan43-error/apply/prd.md §Configuration (worker rows)
-# Architecture: docs/problems/vlan43-error/apply/architecture.md Decision #1, #2
-# Sustainment: RECOMMENDATION.md §4 — file name sorts AFTER /usr/lib/sysctl.d/50-redhat.conf
-#              (the wildcard *.rp_filter=1 writer identified by predecessor D-1).
-# Note: per-iface keys are independent of net.ipv4.conf.all.rp_filter.
-# Workers: include /41 keys to close VLAN41 structural risk per RECOMMENDATION.md §4 row 2.
+# OCC bonding campaign — per-iface rp_filter=2 on bond0 sub-ifaces
+# Source: docs/host-network-bonding/{prd.md,ARCHITECTURE_AND_DESIGN.md}
+# Replaces the pre-bonding eno1/enp5s0 keys (vlan43-error apply campaign).
+# Workers (F-3..F-5): bond0/43 + bond0/41 keys.
+# k8control (F-6): same file content; bond0/41 closes the F-1 VLAN41 gap.
+# Note: per-iface keys apply only when the named iface exists at sysctl-read
+# time. Reboot persistence is handled by the NM dispatcher script
+# /etc/NetworkManager/dispatcher.d/99-occ-vlan-rp_filter (Decision D-6).
 EOF
             ;;
         *)
